@@ -8,7 +8,7 @@ mod progressive_bias;
 //mod unexplored_action_urgency;
 //mod exp3;
 
-pub use monte_carlo::{MonteCarloTreeSearch, VanillaMcts, MonteCarloTreeNode};
+pub use monte_carlo::{MonteCarloTreeNode, MonteCarloTreeSearch, VanillaMcts};
 //pub use rave::RaveTreePolicy;
 //pub use ucb1_tuned::Ucb1TunedPolicy;
 //pub use sufficiency_threshold::SufficiencyTheshold;
