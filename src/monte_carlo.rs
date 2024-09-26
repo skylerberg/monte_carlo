@@ -9,7 +9,7 @@ use rand::prelude::SliceRandom;
 use rand::thread_rng;
 
 use crate::stats::MctsStats;
-use crate::{Game, Status};
+use crate::Game;
 
 pub trait MonteCarloTreeSearch {
     type Game: Game;
@@ -19,15 +19,7 @@ pub trait MonteCarloTreeSearch {
         game: Self::Game,
         iterations: usize,
     ) -> (<Self::Game as Game>::Choice, MctsStats) {
-        let player_id = game.status().get_active_player_id().unwrap();
-        let mut tree: MonteCarloTreeNode<Self::Game> = MonteCarloTreeNode::new(player_id, None);
-
-        for _ in 0..iterations {
-            let mut determinization =
-                game.get_determinization(game.status().get_active_player_id());
-            let outcome = self.iteration(&mut tree, &mut determinization);
-            self.after_iteration(&determinization, outcome);
-        }
+        let tree = self.build_tree(game, iterations);
 
         let selected_child = tree
             .children
@@ -57,38 +49,53 @@ pub trait MonteCarloTreeSearch {
         )
     }
 
-    fn after_iteration(&mut self, _game: &Self::Game, _outcome: <Self::Game as Game>::Outcome) {}
+    fn build_tree(
+        &mut self,
+        game: Self::Game,
+        iterations: usize,
+    ) -> MonteCarloTreeNode<Self::Game>  {
+        let player_id = game.get_active_player_id();
+        let mut tree: MonteCarloTreeNode<Self::Game> = MonteCarloTreeNode::new(player_id, None);
+
+        for _ in 0..iterations {
+            let determinization = game.get_determinization(game.get_active_player_id());
+            let game = self.iteration(&mut tree, determinization);
+            self.after_iteration(&game);
+        }
+        tree
+    }
+
+    fn after_iteration(&mut self, _game: &Self::Game) {}
 
     // Returns the winner of the iteration
     fn iteration(
         &mut self,
         node: &mut MonteCarloTreeNode<Self::Game>,
-        game: &mut Self::Game,
-    ) -> <Self::Game as Game>::Outcome {
-        // If this is a terminal node, immediately retun the outcome
-        if let Status::Terminated(outcome) = game.status() {
-            self.record_outcome(node, game, &outcome);
-            return outcome;
+        mut game: Self::Game,
+    ) -> Self::Game {
+        if game.is_terminal() {
+            self.record_outcome(node, &game);
+            return game;
         }
 
-        let choices_available_count = node.expand(game);
+        let choices_available_count = node.expand(&game);
 
-        let best_child = self.select(node, game, choices_available_count);
-        self.after_selection(game, best_child);
+        let best_child = self.select(node, &game, choices_available_count);
+        self.after_selection(&game, best_child);
         game.apply_choice(best_child.choice.as_ref().unwrap());
 
-        let outcome = if best_child.games == 0.0 {
+        let game = if best_child.games == 0.0 {
             //println!("Rolling out {}", best_child.id);
-            let outcome = self.rollout(best_child, game);
-            self.record_outcome(best_child, game, &outcome);
-            outcome
+            let game = self.rollout(best_child, game);
+            self.record_outcome(best_child, &game);
+            game
         } else {
             //println!("Recursing from {} to {}", node_id, best_child.id);
             self.iteration(best_child, game)
         };
         //println!("Recording at {} after handling {}", node_id, best_child.id);
-        self.record_outcome(node, game, &outcome);
-        return outcome;
+        self.record_outcome(node, &game);
+        return game;
     }
 
     fn after_selection(&mut self, _game: &Self::Game, _selected: &MonteCarloTreeNode<Self::Game>) {}
@@ -157,24 +164,15 @@ pub trait MonteCarloTreeSearch {
     fn rollout(
         &mut self,
         node: &mut MonteCarloTreeNode<Self::Game>,
-        game: &mut Self::Game,
-    ) -> <Self::Game as Game>::Outcome {
-        loop {
-            let game_status = game.status();
-            match game_status {
-                Status::AwaitingAction(_player_id) => {
-                    let choice = game.get_rollout_choice();
-                    let choice = self.intercept_rollout_choice(node, game, choice);
-                    game.apply_choice(&choice);
-                }
-                Status::Terminated(outcome) => {
-                    return outcome;
-                }
-            }
-            if let Some(outcome) = game.heuristic_early_terminate() {
-                return outcome;
-            }
+        mut game: Self::Game,
+    ) -> Self::Game {
+        while !game.is_terminal() && !game.heuristic_early_terminate() {
+            let choice = game.get_rollout_choice();
+            let choice = self.intercept_rollout_choice(node, &mut game, choice);
+            game.apply_choice(&choice);
         }
+
+        return game;
     }
 
     fn intercept_rollout_choice(
@@ -191,9 +189,8 @@ pub trait MonteCarloTreeSearch {
         &mut self,
         node: &mut MonteCarloTreeNode<Self::Game>,
         game: &Self::Game,
-        outcome: &<Self::Game as Game>::Outcome,
     ) {
-        node.cumulative_reward += game.get_reward_for_outcome(node.player_id, outcome);
+        node.cumulative_reward += game.reward_for(node.player_id);
         node.games += 1.0;
     }
 }
@@ -246,10 +243,12 @@ where
             return None;
         }
         let mut rng = thread_rng();
-        let active_player = game.status().get_active_player_id().unwrap();
+        let active_player = game.get_active_player_id();
         let mut choices = game.get_all_choices();
         let mut added_new_node = false;
+
         choices.shuffle(&mut rng);
+
         for choice in &choices {
             //self.choice_availability_count.entry(choice.clone()).and_modify(|e| *e += 1).or_insert(0);
             if let Some(count) = self.choice_availability_count.get_mut(&choice) {
@@ -282,4 +281,58 @@ pub fn upper_confidence_bound(
     //let c = 2.0_f64.sqrt();
     let win_rate = cumulative_reward / games;
     win_rate + c * f64::sqrt(f64::ln(total_game_count) / games)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    pub struct ThreeBranchThreeDepthAlwaysWin {
+        turn_number: usize,
+    }
+
+    impl ThreeBranchThreeDepthAlwaysWin {
+        pub fn new() -> Self {
+            ThreeBranchThreeDepthAlwaysWin {
+                turn_number: 0,
+            }
+        }
+    }
+
+    impl Game for ThreeBranchThreeDepthAlwaysWin {
+        type Choice = usize;
+
+        type PlayerId = usize;
+
+        fn get_all_choices(&self) -> Vec<Self::Choice> {
+            return vec![1, 2, 3];
+        }
+
+        fn apply_choice(&mut self, _choice: &Self::Choice) {
+            self.turn_number += 1;
+        }
+
+        fn get_active_player_id(&self) -> Self::PlayerId {
+            return 1;
+        }
+
+        fn is_terminal(&self) -> bool {
+            self.turn_number >= 3
+        }
+
+        fn reward_for(&self, _player_id: Self::PlayerId) -> f64 {
+            1.0
+        }
+    }
+
+    #[test]
+    fn test_even_exploration() {
+        let game = ThreeBranchThreeDepthAlwaysWin::new();
+        let mut mcts: VanillaMcts<ThreeBranchThreeDepthAlwaysWin> = VanillaMcts::new();
+        let tree = mcts.build_tree(game.clone(), 3 * 3 * 3);
+        assert_eq!(tree.children.len(), 3);
+        assert!(tree.children.iter().all(|(_, child)| child.games == 3.0 * 3.0));
+        assert!(tree.children.iter().all(|(_, child)| child.cumulative_reward == 3.0 * 3.0));
+    }
 }
