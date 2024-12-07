@@ -78,9 +78,9 @@ pub trait MonteCarloTreeSearch {
             return game;
         }
 
-        let choices_available_count = node.expand(&game);
+        let choices = node.expand(&game, game.shuffle_on_expand());
 
-        let best_child = self.select(node, &game, choices_available_count);
+        let best_child = self.select(node, &game, choices);
         self.after_selection(&game, best_child);
         game.apply_choice(best_child.choice.as_ref().unwrap());
 
@@ -166,7 +166,7 @@ pub trait MonteCarloTreeSearch {
         node: &mut MonteCarloTreeNode<Self::Game>,
         mut game: Self::Game,
     ) -> Self::Game {
-        while !game.is_terminal() && !game.heuristic_early_terminate() {
+        while !game.is_terminal() && !self.heuristic_early_terminate(&game) {
             let choice = game.get_rollout_choice();
             let choice = self.intercept_rollout_choice(node, &mut game, choice);
             game.apply_choice(&choice);
@@ -193,6 +193,11 @@ pub trait MonteCarloTreeSearch {
         node.cumulative_reward += game.reward_for(node.player_id);
         node.games += 1.0;
     }
+
+    fn heuristic_early_terminate(&self, _game: &Self::Game) -> bool {
+        false
+    }
+
 }
 
 #[derive(Clone, Copy, Default)]
@@ -238,19 +243,20 @@ where
     }
 
     // Returns the choices available for non-root nodes
-    fn expand(&mut self, game: &G) -> Option<Vec<<G as Game>::Choice>> {
+    fn expand(&mut self, game: &G, shuffle: bool) -> Option<Vec<<G as Game>::Choice>> {
         if self.is_root() && !self.children.is_empty() {
             return None;
         }
-        let mut rng = thread_rng();
         let active_player = game.get_active_player_id();
         let mut choices = game.get_all_choices();
         let mut added_new_node = false;
 
-        choices.shuffle(&mut rng);
+        if shuffle {
+            let mut rng = thread_rng();
+            choices.shuffle(&mut rng);
+        }
 
         for choice in &choices {
-            //self.choice_availability_count.entry(choice.clone()).and_modify(|e| *e += 1).or_insert(0);
             if let Some(count) = self.choice_availability_count.get_mut(&choice) {
                 *count += 1;
             } else {
@@ -327,12 +333,198 @@ mod tests {
     }
 
     #[test]
+    fn test_explores_each_option_once() {
+        let game = ThreeBranchThreeDepthAlwaysWin::new();
+        let mut mcts: VanillaMcts<ThreeBranchThreeDepthAlwaysWin> = VanillaMcts::new();
+        let tree = mcts.build_tree(game.clone(), 3);
+        assert_eq!(tree.children.len(), 3);
+        assert!(tree.children.iter().all(|(_, child)| child.games == 1.0));
+        assert!(tree.children.iter().all(|(_, child)| child.cumulative_reward == 1.0));
+    }
+
+    #[test]
     fn test_even_exploration() {
         let game = ThreeBranchThreeDepthAlwaysWin::new();
         let mut mcts: VanillaMcts<ThreeBranchThreeDepthAlwaysWin> = VanillaMcts::new();
-        let tree = mcts.build_tree(game.clone(), 3 * 3 * 3);
+        let tree = mcts.build_tree(game.clone(), 3 * 3 * 3 * 3);
         assert_eq!(tree.children.len(), 3);
-        assert!(tree.children.iter().all(|(_, child)| child.games == 3.0 * 3.0));
-        assert!(tree.children.iter().all(|(_, child)| child.cumulative_reward == 3.0 * 3.0));
+        assert!(tree.children.iter().all(|(_, child)| child.games == 3.0 * 3.0 * 3.0));
+        assert!(tree.children.iter().all(|(_, child)| child.cumulative_reward == 3.0 * 3.0 * 3.0));
+    }
+
+    #[derive(Clone)]
+    pub struct BinaryTreeDepthThreeZeroWins {
+        turn_number: usize,
+        points: usize,
+    }
+
+    impl BinaryTreeDepthThreeZeroWins {
+        pub fn new() -> Self {
+            BinaryTreeDepthThreeZeroWins {
+                turn_number: 0,
+                points: 0,
+            }
+        }
+    }
+
+    impl Game for BinaryTreeDepthThreeZeroWins {
+        type Choice = usize;
+
+        type PlayerId = usize;
+
+        fn get_all_choices(&self) -> Vec<Self::Choice> {
+            return vec![0, 1];
+        }
+
+        fn apply_choice(&mut self, choice: &Self::Choice) {
+            println!("{}", choice);
+            self.turn_number += 1;
+            if *choice == 1 {
+                self.points += 1;
+            }
+        }
+
+        fn get_active_player_id(&self) -> Self::PlayerId {
+            return 1;
+        }
+
+        fn is_terminal(&self) -> bool {
+            self.turn_number >= 3
+        }
+
+        fn reward_for(&self, _player_id: Self::PlayerId) -> f64 {
+            if self.points == 3 { 1.0 } else { 0.0 }
+        }
+
+        fn shuffle_on_expand(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn finds_best() {
+        let game = BinaryTreeDepthThreeZeroWins::new();
+        let mut mcts: VanillaMcts<BinaryTreeDepthThreeZeroWins> = VanillaMcts::new();
+        let (choice, _) = mcts.monte_carlo_tree_search(game.clone(), 8);
+        assert_eq!(choice, 1);
+    }
+
+    #[derive(Clone)]
+    pub struct GameNode {
+        children: Vec<GameNode>,
+        winner: Option<usize>,
+    }
+
+    impl GameNode {
+        pub fn new(children: Vec<GameNode>, winner: Option<usize>) -> Self {
+            GameNode {
+                children,
+                winner,
+            }
+        }
+
+        pub fn you_choose(children: Vec<GameNode>) -> Self {
+            GameNode {
+                children,
+                winner: None,
+            }
+        }
+
+        pub fn they_choose(children: Vec<GameNode>) -> Self {
+            GameNode {
+                children,
+                winner: None,
+            }
+        }
+
+        pub fn winner(player_id: usize) -> Self {
+            GameNode {
+                children: vec![],
+                winner: Some(player_id),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct CustomGameTree {
+        state: GameNode,
+        active_player: usize,
+        player_count: usize,
+    }
+
+    impl CustomGameTree {
+        pub fn minimal_trap() -> Self {
+            let you = 0;
+            let them = 1;
+            CustomGameTree {
+                state: GameNode::you_choose(vec![
+                    // If you chose this node it seems like you have 2/3 win chance, but you always lose
+                    GameNode::they_choose(vec![
+                        GameNode::winner(you),
+                        GameNode::winner(you),
+                        GameNode::winner(them),
+                    ]),
+                    // If you chose this node it seems like you have 1/3 win chance, but you always win
+                    GameNode::they_choose(vec![
+                        GameNode::you_choose(vec![
+                            GameNode::winner(you),
+                            GameNode::winner(them),
+                            GameNode::winner(them),
+                        ]),
+                        GameNode::you_choose(vec![
+                            GameNode::winner(you),
+                            GameNode::winner(them),
+                            GameNode::winner(them),
+                        ]),
+                        GameNode::you_choose(vec![
+                            GameNode::winner(you),
+                            GameNode::winner(them),
+                            GameNode::winner(them),
+                        ]),
+                    ]),
+                ]),
+                active_player: you,
+                player_count: 2,
+            }
+        }
+    }
+
+    impl Game for CustomGameTree {
+        type Choice = usize;
+
+        type PlayerId = usize;
+
+        fn get_all_choices(&self) -> Vec<Self::Choice> {
+            (0..self.state.children.len()).collect()
+        }
+
+        fn apply_choice(&mut self, choice: &Self::Choice) {
+            self.state = self.state.children.remove(*choice);
+            self.active_player = (self.active_player + 1) % self.player_count;
+        }
+
+        fn get_active_player_id(&self) -> Self::PlayerId {
+            return self.active_player;
+        }
+
+        fn is_terminal(&self) -> bool {
+            self.state.winner.is_some()
+        }
+
+        fn reward_for(&self, player_id: Self::PlayerId) -> f64 {
+            if self.state.winner.unwrap() == player_id { 1.0 } else { 0.0 }
+        }
+
+        fn shuffle_on_expand(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn defeats_trap() {
+        let game = CustomGameTree::minimal_trap();
+        let mut mcts: VanillaMcts<CustomGameTree> = VanillaMcts::new();
+        let (choice, _) = mcts.monte_carlo_tree_search(game.clone(), 40);
+        assert_eq!(choice, 1);
     }
 }
