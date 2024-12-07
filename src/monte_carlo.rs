@@ -166,7 +166,7 @@ pub trait MonteCarloTreeSearch {
         node: &mut MonteCarloTreeNode<Self::Game>,
         mut game: Self::Game,
     ) -> Self::Game {
-        while !game.is_terminal() && !self.heuristic_early_terminate(&game) {
+        while !game.is_terminal() && !game.heuristic_early_terminate() {
             let choice = game.get_rollout_choice();
             let choice = self.intercept_rollout_choice(node, &mut game, choice);
             game.apply_choice(&choice);
@@ -193,11 +193,6 @@ pub trait MonteCarloTreeSearch {
         node.cumulative_reward += game.reward_for(node.player_id);
         node.games += 1.0;
     }
-
-    fn heuristic_early_terminate(&self, _game: &Self::Game) -> bool {
-        false
-    }
-
 }
 
 #[derive(Clone, Copy, Default)]

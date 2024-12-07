@@ -33,6 +33,10 @@ pub trait Game: Clone {
         self.get_all_choices().choose(&mut rng).unwrap().clone()
     }
 
+    fn heuristic_early_terminate(&self) -> bool {
+        false
+    }
+
     fn shuffle_on_expand(&self) -> bool {
         true
     }
