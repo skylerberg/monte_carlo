@@ -70,14 +70,20 @@ pub trait Game: Sized {
     /// flat bandit over decisions the tree does not model. Use `()` if unused.
     type Side: Default;
 
-    /// Set when the root's legal choices do not vary across determinizations —
-    /// true whenever determinization only reshuffles information hidden *from*
-    /// the perspective player, which is the usual case.
+    /// Set only when the root's legal choices provably do not vary across
+    /// determinizations. Then the root is enumerated once per search instead of
+    /// once per iteration.
     ///
-    /// When true the root is enumerated once per search instead of once per
-    /// iteration. Verify it for your game: if the root's choice set really can
-    /// change, leaving this on silently searches stale moves.
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    /// **Off by default, and turn it on only with evidence.** It is tempting to
+    /// reason that determinization reshuffles only what is hidden from the
+    /// searching player, so their own options cannot change — that argument is
+    /// easy to make and hard to make correctly. When it is wrong, the search
+    /// selects a choice that is illegal in the current determinization, and
+    /// what you get is a wrong move rather than a slow search.
+    ///
+    /// Debug builds verify the claim on every iteration and panic if it breaks,
+    /// so run your integration tests in debug before trusting it in release.
+    const ROOT_CHOICES_INVARIANT: bool = false;
 
     /// Child count above which a node builds a hash index for lookup.
     ///

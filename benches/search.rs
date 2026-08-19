@@ -113,6 +113,9 @@ impl Game for Narrow {
     type Context = ();
     type Side = ();
 
+    // Left at the default: `choices_into` filters on `hidden`, which
+    // determinization permutes, so the root's choice set really does vary.
+
     fn status(&self, _: &()) -> Status<Self::Rewards> {
         if self.ply >= NARROW_PLIES {
             Status::Terminal(self.rewards())
@@ -197,6 +200,8 @@ impl Game for Wide {
 
     // Heap-owning choices cross over sooner; see benchmarks/BASELINE.md.
     const CHILD_INDEX_THRESHOLD: usize = 8;
+    // Perfect information: determinization is a copy, so the root cannot vary.
+    const ROOT_CHOICES_INVARIANT: bool = true;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.ply >= WIDE_PLIES {
@@ -265,6 +270,9 @@ impl Game for Tiny {
     type Rewards = [f64; 2];
     type Context = ();
     type Side = ();
+
+    // Perfect information: determinization is a copy, so the root cannot vary.
+    const ROOT_CHOICES_INVARIANT: bool = true;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.ply >= 8 {
