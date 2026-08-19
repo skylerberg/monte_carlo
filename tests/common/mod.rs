@@ -172,6 +172,21 @@ impl GameTree {
         self.active_player = (self.active_player + 1) % self.player_count;
     }
 
+    /// Two plies of `width` choices each, so a subtree re-rooted after the
+    /// first move still faces a wide choice set at the second.
+    pub fn wide_two_ply(width: usize) -> Self {
+        let second_ply = || {
+            let mut leaves: Vec<TreeNode> = (0..width - 1).map(|_| TreeNode::winner(1)).collect();
+            leaves.push(TreeNode::winner(0));
+            TreeNode::branch(leaves)
+        };
+        Self {
+            state: TreeNode::branch((0..width).map(|_| second_ply()).collect()),
+            active_player: 0,
+            player_count: 2,
+        }
+    }
+
     /// A root with `width` choices, each leading straight to a terminal node.
     /// Choice `width - 1` is the only win, so the search has to open every
     /// child — which is what exercises wide-node child lookup.

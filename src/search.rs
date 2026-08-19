@@ -97,6 +97,14 @@ pub struct Searcher<G: Game> {
     path: Vec<u32>,
     side: G::Side,
     root: Option<Node<G::Choice>>,
+    /// Whether the root has had a full expansion pass, creating a child for
+    /// every legal choice.
+    ///
+    /// A root re-rooted from a subtree has children, but only the handful
+    /// progressive expansion happened to create at its old position. "Has
+    /// children" is a different question, and answering it that way lets the
+    /// search pick a choice that is no longer legal.
+    root_fully_expanded: bool,
     /// Whether the retained tree describes the position about to be searched.
     ///
     /// A search clears this; only `reuse_subtree` sets it. So carrying a tree
@@ -117,6 +125,7 @@ impl<G: Game> Searcher<G> {
             path: Vec::new(),
             side: Default::default(),
             root: None,
+            root_fully_expanded: false,
             tree_is_current: false,
         }
     }
@@ -129,6 +138,7 @@ impl<G: Game> Searcher<G> {
     /// Discard the retained tree.
     pub fn clear_tree(&mut self) {
         self.root = None;
+        self.root_fully_expanded = false;
         self.tree_is_current = false;
     }
 
@@ -147,6 +157,7 @@ impl<G: Game> Searcher<G> {
         let Some(root) = self.root.as_mut() else {
             return false;
         };
+        self.root_fully_expanded = false;
         if root.reroot_at(choice) {
             self.tree_is_current = true;
             true
@@ -206,6 +217,7 @@ impl<G: Game> Searcher<G> {
         }
         if self.root.is_none() {
             self.root = Some(Node::new_root(root_player));
+            self.root_fully_expanded = false;
         }
         state.init_side(ctx, &mut self.side);
 
@@ -217,6 +229,7 @@ impl<G: Game> Searcher<G> {
             path,
             side,
             root,
+            root_fully_expanded,
             tree_is_current,
         } = self;
         let root = root.as_mut().expect("root was just created");
@@ -252,6 +265,7 @@ impl<G: Game> Searcher<G> {
                 avail,
                 root_avail,
                 path,
+                root_fully_expanded,
                 cfg,
                 perspective,
                 rng,
@@ -327,6 +341,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
     avail: &mut Vec<bool>,
     root_avail: &mut Vec<bool>,
     path: &mut Vec<u32>,
+    root_fully_expanded: &mut bool,
     cfg: &Config,
     perspective: u8,
     rng: &mut R,
@@ -348,8 +363,32 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
         // An already-expanded root whose choice set cannot vary needs neither
         // enumeration nor expansion, which is the difference between paying for
         // move generation once per search and once per iteration.
-        let reuse_root = G::ROOT_CHOICES_INVARIANT && node.is_root() && !node.children.is_empty();
+        let reuse_root = G::ROOT_CHOICES_INVARIANT && node.is_root() && *root_fully_expanded;
         let available: &[bool] = if reuse_root {
+            // Skipping enumeration is only sound if the choice set really is
+            // invariant. Check it where checking is affordable, so a game that
+            // sets the flag wrongly fails loudly instead of quietly returning a
+            // choice that is illegal in this determinization.
+            #[cfg(debug_assertions)]
+            {
+                choices.clear();
+                state.choices_into(ctx, choices);
+                assert_eq!(
+                    choices.len(),
+                    node.children.len(),
+                    "ROOT_CHOICES_INVARIANT is set, but this determinization has {} \
+                     root choices where the tree holds {} children",
+                    choices.len(),
+                    node.children.len()
+                );
+                for choice in choices.iter() {
+                    assert!(
+                        node.find_child(choice).is_some(),
+                        "ROOT_CHOICES_INVARIANT is set, but this determinization offers \
+                         a root choice the tree has no child for"
+                    );
+                }
+            }
             root_avail.clear();
             root_avail.resize(node.children.len(), true);
             root_avail
@@ -357,6 +396,9 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
             choices.clear();
             state.choices_into(ctx, choices);
             node.expand(choices, player, G::CHILD_INDEX_THRESHOLD, avail, rng);
+            if node.is_root() {
+                *root_fully_expanded = true;
+            }
             avail
         };
 

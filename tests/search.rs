@@ -157,6 +157,35 @@ fn a_tree_is_not_reused_unless_asked_for() {
     );
 }
 
+/// A re-rooted subtree carries only the children progressive expansion happened
+/// to create at the previous position. The next search must still open every
+/// legal choice at the new one — otherwise it can only ever return a move from
+/// that stale subset, which may no longer be legal.
+#[test]
+fn a_reused_root_still_expands_every_choice() {
+    let mut game = GameTree::wide_two_ply(40);
+    let mut searcher = Searcher::new(&game);
+
+    let first = searcher.search(&game, &(), 0, &config(60), None, &mut rng(17));
+    assert!(searcher.reuse_subtree(&first.choice));
+    game.apply(&first.choice);
+
+    // The subtree kept far fewer children than the new position has choices.
+    let carried = searcher.tree().unwrap().children().len();
+    let legal = game.state.children.len();
+    assert!(
+        carried < legal,
+        "test is not exercising the gap: carried {carried}, legal {legal}"
+    );
+
+    searcher.search(&game, &(), 1, &config(300), None, &mut rng(19));
+    assert_eq!(
+        searcher.tree().unwrap().children().len(),
+        legal,
+        "reused root was never fully expanded, so most legal choices are unreachable"
+    );
+}
+
 #[test]
 fn wide_nodes_track_every_child() {
     const WIDTH: usize = 200;

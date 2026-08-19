@@ -61,12 +61,18 @@ is compared against.
 
 | bench | budget | median | iterations/sec |
 |---|---:|---:|---:|
-| `tiny/100k` | 100 000 | 22.44 ms | 4.46 M |
-| `narrow/1000` | 1 000 | 676 µs | 1.48 M |
-| `narrow/10000` | 10 000 | 8.57 ms | 1.17 M |
-| `wide/100` | 300 | 364 µs | 823 K |
-| `wide/400` | 1 200 | 5.66 ms | 212 K |
+| `tiny/100k` | 100 000 | 22.4 ms | 4.46 M |
+| `narrow/1000` | 1 000 | 718 µs | 1.39 M |
+| `narrow/10000` | 10 000 | 8.99 ms | 1.11 M |
+| `wide/100` | 300 | 361 µs | 831 K |
+| `wide/400` | 1 200 | 5.56 ms | 216 K |
 | `wide/1600` | 4 800 | 93.6 ms | 51 K |
+
+`narrow` is ~6% slower than first recorded because it now leaves
+`ROOT_CHOICES_INVARIANT` off, which is the correct setting for it: its legal
+choices depend on information that determinization permutes, so the root really
+does have to be re-enumerated every iteration. The earlier number was measured
+with an optimization that is unsound for that game.
 
 `tiny` is the search core with the game removed: **224 ns per iteration**, which
 is the floor everything else sits on top of. `narrow` costs ~4x that, most of it
