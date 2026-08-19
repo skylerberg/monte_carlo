@@ -97,6 +97,12 @@ pub struct Searcher<G: Game> {
     path: Vec<u32>,
     side: G::Side,
     root: Option<Node<G::Choice>>,
+    /// Whether the retained tree describes the position about to be searched.
+    ///
+    /// A search clears this; only `reuse_subtree` sets it. So carrying a tree
+    /// forward is something you ask for, and forgetting to leaves you with a
+    /// correct search rather than one rooted at last turn's position.
+    tree_is_current: bool,
 }
 
 impl<G: Game> Searcher<G> {
@@ -111,6 +117,7 @@ impl<G: Game> Searcher<G> {
             path: Vec::new(),
             side: Default::default(),
             root: None,
+            tree_is_current: false,
         }
     }
 
@@ -122,11 +129,16 @@ impl<G: Game> Searcher<G> {
     /// Discard the retained tree.
     pub fn clear_tree(&mut self) {
         self.root = None;
+        self.tree_is_current = false;
     }
 
     /// Re-root the retained tree at `choice` so the next search inherits its
     /// statistics. Returns false, and drops the tree, if `choice` is not a root
     /// child.
+    ///
+    /// Carrying a tree forward has to be asked for: a search leaves the tree
+    /// marked stale, and only this re-arms it. Forgetting to call it therefore
+    /// costs a fresh search rather than one rooted at the previous position.
     ///
     /// Only sound when the next search really continues from that position — the
     /// same player still to act, and no hidden information revealed in between.
@@ -136,9 +148,11 @@ impl<G: Game> Searcher<G> {
             return false;
         };
         if root.reroot_at(choice) {
+            self.tree_is_current = true;
             true
         } else {
             self.root = None;
+            self.tree_is_current = false;
             false
         }
     }
@@ -185,6 +199,11 @@ impl<G: Game> Searcher<G> {
             _ => {}
         }
 
+        // Anything retained from an earlier search describes an earlier
+        // position unless `reuse_subtree` re-rooted it since.
+        if !self.tree_is_current {
+            self.root = None;
+        }
         if self.root.is_none() {
             self.root = Some(Node::new_root(root_player));
         }
@@ -198,6 +217,7 @@ impl<G: Game> Searcher<G> {
             path,
             side,
             root,
+            tree_is_current,
         } = self;
         let root = root.as_mut().expect("root was just created");
 
@@ -262,6 +282,8 @@ impl<G: Game> Searcher<G> {
                 (choices[k].clone(), 0, 0.0)
             }
         };
+
+        *tree_is_current = false;
 
         SearchResult {
             choice,
