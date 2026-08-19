@@ -1,72 +1,78 @@
-# monte_carlo
+# mcts
 
-A rust library for Monte Carlo Tree Search.
+Monte Carlo Tree Search for board games, including imperfect-information games
+via Information Set MCTS.
 
-Implements Monte Carlo Tree Search (MCTS) using Upper Confidence Bound for Trees
-(UCT).
+Built to be dropped into a real game engine without giving up the performance of
+a hand-written search: no trait objects on the hot path, no allocation per
+iteration beyond growing the tree, and no policy-inheritance layer to indirect
+through.
 
-Many optimizations are from [1].
+## Using it
 
-## Planned
+Implement `Game`, then drive a `Searcher`:
 
-### MCTS-Solver [3]
+```rust
+let mut searcher = Searcher::new(&state);
+let result = searcher.search(&state, &ctx, player, &config, None, &mut rng);
 
-This approach takes into account proven wins and losses.
+state.apply(&result.choice);
+searcher.reuse_subtree(&result.choice);   // next search inherits this subtree
+```
 
-* Decisive and Anti-Decisive Moves [2]
+`examples/tic_tac_toe.rs` is a complete implementation of a perfect-information
+game; run it with `cargo run --release --example tic_tac_toe`.
 
+## What it does
 
-## Brain Dump
+* **Information Set MCTS** — a fresh determinization per iteration, and an
+  exploration term over how often a choice was *available* rather than how often
+  its parent was visited, so a rarely-legal move is not mistaken for an
+  under-explored one.
+* **max^n backup** over per-player reward vectors. Any number of players, any
+  reward scale; nothing assumes two players or zero sum.
+* **Budgets** by iterations, wall clock, or an external `AtomicBool`, plus early
+  termination once the remaining iterations provably cannot change the answer.
+* **Tree reuse** across moves, and root parallelism behind the `parallel`
+  feature.
+* **Progressive bias** from a game-supplied prior, evaluated once per child.
 
-Built in optimizations:
-* 
+## How it is put together
 
-Configurable variants:
-* Nondeterministic MCTS
-  * Determinization
-  * Information Set UCT (ISUCT) (I think I have this implemented)
+Everything a search varies on is either a field on `Config` or a hook on your own
+game type. There is no policy trait to override, which is what keeps the hot path
+monomorphic and inlinable across the crate boundary.
 
-Not implemented variants:
-* Flat UCB
-* Bandit Algorithm for Smooth Trees (BAST) (extends Flat UCB)
-* Learning in MCTS (Is this actually a variant?)
-* Single-Player MCTS (SP-MCTS)
-  * Feature UCT Selection (FUSE)
-* Multi-player MCTS
-  * Coalition Reduction
-* Multi-agent MCTS
-  * Ensemble UCT
-* Real-time MCTS
-* Nondeterministic MCTS
-  * Hindsight optimisation (HOP)
-  * Sparse UCT
-  * Multiple MCTS
-  * UCT+
-  * Monte Carlo alpha-beta (MC_alpha_beta)
-  * Monte Carlo Counterfactual Regret (MCCFR)
-  * Inference and Opponent Modelling
-  * Simultaneous Moves
-* Recursive Approaches
-  * Reflexive Monte Carlo Search
-  * Nested Monte Carlo Search
-  * Nested Rollout Policy Adaptation (NRPA)
-  * Meta-MCTS
-  * Heuristically Guided Swarm Tree Search
-* Sample-Based Planners
-  * Forward Search Sparse Sampling (FSSS)
-  * Threshold Ascent for Graphs (TAG)
-  * RRTs
-  * UNLEO
-  * UCTSAT
-  * _rho UCT
-  * Monte Carlo Random Walks (MRW)
-  * Mean-based Heuristic Search for Anytime Planning (MHSP)
+Two associated types carry what does not belong in the game state:
 
+* `Context` — immutable for the whole search: evaluation tables, tuned
+  parameters, move-filter flags. Keeping these out of the state means they are
+  not copied on every determinization.
+* `Side` — mutable, owned by the search, invisible to the tree. This is where a
+  side model lives, such as a flat bandit over decisions you do not want to
+  branch on.
 
+Children are owned inline in a contiguous `Vec`, which is what selection scans.
+A node builds a hash index only once it has more children than
+`Game::CHILD_INDEX_THRESHOLD`; see `benchmarks/BASELINE.md` for the measured
+crossover and why one strategy does not fit every branching factor.
 
+## Features
 
-[1] Browne, Cameron & Powley, Edward & Whitehouse, Daniel & Lucas, Simon & Cowling, Peter & Rohlfshagen, Philipp & Tavener, Stephen & Perez Liebana, Diego & Samothrakis, Spyridon & Colton, Simon. (2012). A Survey of Monte Carlo Tree Search Methods. IEEE Transactions on Computational Intelligence and AI in Games. 4:1. 1-43. 10.1109/TCIAIG.2012.2186810.
+| feature | default | effect |
+|---|---|---|
+| `time` | yes | wall-clock budgets. Turn it off for `wasm32-unknown-unknown`, where `Instant` panics. |
+| `parallel` | no | `RootParallel`: independent trees per thread, merged at the root. |
+| `serde` | no | `Config` is serialisable. |
 
-[2] Teytaud, Fabien & Teytaud, Olivier. (2010). On the Huge Benefit of Decisive Moves in Monte-Carlo Tree Search Algorithms. Proceedings of the 2010 IEEE Conference on Computational Intelligence and Games, CIG2010. 359 - 364. 10.1109/ITW.2010.5593334. 
+## References
 
-[3] Winands, Mark & Björnsson, Yngvi & Saito, Jahn-Takeshi. (2008). Monte-Carlo Tree Search Solver. 25-36. 10.1007/978-3-540-87608-3_3.
+Most of the algorithm, and the vocabulary, comes from Browne et al.'s survey [1].
+The Information Set treatment follows Cowling, Powley and Whitehouse [2].
+
+[1] Browne, C. et al. (2012). *A Survey of Monte Carlo Tree Search Methods.*
+IEEE Transactions on Computational Intelligence and AI in Games, 4(1), 1–43.
+
+[2] Cowling, P., Powley, E. & Whitehouse, D. (2012). *Information Set Monte Carlo
+Tree Search.* IEEE Transactions on Computational Intelligence and AI in Games,
+4(2), 120–143.
