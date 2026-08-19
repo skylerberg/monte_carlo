@@ -128,6 +128,35 @@ fn reused_subtree_carries_its_statistics_forward() {
     assert_eq!(second.root_visits, 200);
 }
 
+/// A retained tree describes the position it was built for. Searching a new
+/// position without re-rooting must not inherit it — otherwise the search
+/// returns a choice that was legal at the previous position and may not even
+/// exist at this one.
+#[test]
+fn a_tree_is_not_reused_unless_asked_for() {
+    let mut game = GameTree::minimal_trap();
+    let mut searcher = Searcher::new(&game);
+
+    let first = searcher.search(&game, &(), 0, &config(100), None, &mut rng(5));
+    game.apply(&first.choice);
+
+    // Deliberately no reuse_subtree call here.
+    let second = searcher.search(&game, &(), 1, &config(100), None, &mut rng(5));
+
+    assert_eq!(
+        second.reused_iterations, 0,
+        "stale tree was carried forward"
+    );
+    assert_eq!(second.root_visits, 100);
+
+    let legal: Vec<usize> = (0..game.state.children.len()).collect();
+    assert!(
+        legal.contains(&second.choice),
+        "chose {} which is not legal here; legal choices are {legal:?}",
+        second.choice
+    );
+}
+
 #[test]
 fn wide_nodes_track_every_child() {
     const WIDTH: usize = 200;
