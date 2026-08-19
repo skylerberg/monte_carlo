@@ -187,6 +187,21 @@ fn a_reused_root_still_expands_every_choice() {
 }
 
 #[test]
+fn taking_the_tree_leaves_the_searcher_empty() {
+    let game = GameTree::minimal_trap();
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &config(80), None, &mut rng(4));
+
+    let tree = searcher.take_tree().expect("a search leaves a tree");
+    assert_eq!(tree.visits(), 80);
+    assert!(searcher.tree().is_none());
+
+    // Having taken it, the next search must start from nothing.
+    let next = searcher.search(&game, &(), 0, &config(80), None, &mut rng(4));
+    assert_eq!(next.reused_iterations, 0);
+}
+
+#[test]
 fn wide_nodes_track_every_child() {
     const WIDTH: usize = 200;
     let game = GameTree::wide(WIDTH);

@@ -135,6 +135,16 @@ impl<G: Game> Searcher<G> {
         self.root.as_ref()
     }
 
+    /// Take the retained tree, leaving the searcher with none.
+    ///
+    /// For handing a finished tree to something that outlives the searcher —
+    /// an inspector or a UI thread. The next search starts fresh.
+    pub fn take_tree(&mut self) -> Option<Node<G::Choice>> {
+        self.root_fully_expanded = false;
+        self.tree_is_current = false;
+        self.root.take()
+    }
+
     /// Discard the retained tree.
     pub fn clear_tree(&mut self) {
         self.root = None;
