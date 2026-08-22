@@ -509,6 +509,13 @@ pub trait Game: Sized {
     /// Writing into a caller-owned buffer (rather than returning `Self`) is what
     /// lets an implementation reuse its inner allocations via `clone_from`. For
     /// a perfect-information game this is `dest.clone_from(self)`.
+    ///
+    /// A determinization may change which actions are legal, and it may sample
+    /// a world that is already over. It must not change *who* is to act: the
+    /// tree records one node's statistics across every determinization that
+    /// reaches it, so a node whose kind or participant set varies would have
+    /// one player's arms read as another's, and debug builds assert against it
+    /// during the descent.
     fn determinize_into<R: Rng + ?Sized>(
         &self,
         dest: &mut Self,
@@ -524,6 +531,17 @@ pub trait Game: Sized {
     ///
     /// Called once after each determinization and again after every applied
     /// choice during descent, including after [`Game::apply_joint`].
+    ///
+    /// The call on the root state must leave the decision being searched
+    /// intact: the same kind of decision, for the same player or the same
+    /// participants, offering the same choices. [`crate::Searcher::search`]
+    /// reads the root player and the answer list from the state it was handed
+    /// and builds the tree on the advanced one, so an `advance` that consumes
+    /// the root's own decision returns a move belonging to somebody else — or
+    /// one the position does not offer at all. Debug builds compare the root
+    /// decision and its answer list across this call on every determinization,
+    /// since an `advance` driven by a side model can consume the root's
+    /// decision in some worlds and leave it standing in others.
     ///
     /// A game whose `advance` resolves opponent moves through a side model is
     /// doing something that overlaps semantically with simultaneous play, and
