@@ -66,7 +66,7 @@ fn record<G: Game<Choice = usize, Context = ()>>(
         .iter()
         .map(|c| {
             (
-                *c.choice().expect("a root child has a choice"),
+                *c.edge().choice().expect("a root child has a choice"),
                 c.visits(),
                 c.cumulative_reward(),
             )

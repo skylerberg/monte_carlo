@@ -144,7 +144,7 @@ where
         // answering `MostVisited` with the pooled-visit argmax would return an
         // action the single-threaded path was deliberately corrected away from.
         let mixes = simultaneous && G::SIMULTANEOUS_POLICY.mixes();
-        let sample = mixes && cfg.root_policy == RootPolicy::Sampled;
+        let sample = mixes && cfg.simultaneous.root_policy == RootPolicy::Sampled;
 
         let mut merged = Merged::new();
         let mut strategy = Vec::new();
@@ -205,6 +205,7 @@ where
                              player's marginals instead."
                         );
                         let choice = child
+                            .edge()
                             .choice()
                             .expect("a sequential root's children all carry a choice");
                         let index = merged.slot(choice);
@@ -393,6 +394,7 @@ fn sample_merged<R: Rng + ?Sized>(strategy: &[f64], rng: &mut R) -> Option<usize
 mod tests {
     use super::*;
     use crate::game::{JointChoices, PlayerSet, Status};
+    use crate::search::SimultaneousConfig;
     use crate::util::below;
     use rand_core::SeedableRng;
     use wyrand::WyRand;
@@ -696,7 +698,7 @@ mod tests {
             .map(|root| {
                 root.children()
                     .iter()
-                    .find(|child| child.choice() == Some(&2))
+                    .find(|child| child.edge().choice() == Some(&2))
                     .map_or(0, |child| child.visits())
             })
             .sum();
@@ -708,7 +710,10 @@ mod tests {
     fn a_simultaneous_merge_pools_the_perspective_players_arms() {
         let game = TwoRoundRps::default();
         let cfg = Config {
-            root_policy: RootPolicy::MostVisited,
+            simultaneous: SimultaneousConfig {
+                root_policy: RootPolicy::MostVisited,
+                ..Default::default()
+            },
             ..config(2_000)
         };
         let mut workers = seeded(4, &game);
@@ -760,7 +765,10 @@ mod tests {
     fn a_most_visited_merge_agrees_with_a_single_threaded_search() {
         let game = RareFavourite::default();
         let cfg = Config {
-            root_policy: RootPolicy::MostVisited,
+            simultaneous: SimultaneousConfig {
+                root_policy: RootPolicy::MostVisited,
+                ..Default::default()
+            },
             ..config(4_000)
         };
 

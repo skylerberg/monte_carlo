@@ -14,7 +14,7 @@ mod common;
 
 use common::{ManyArm, Rps, MANY_ARM_ACTIONS, PENNIES_PAYOFFS};
 use mcts::rand_core::{Rng, SeedableRng};
-use mcts::{Config, Game, JointChoices, Node, NodeKind, PlayerSet, Searcher, Status};
+use mcts::{Config, Edge, Game, JointChoices, Node, NodeKind, PlayerSet, Searcher, Status};
 use wyrand::WyRand;
 
 fn rng(seed: u64) -> WyRand {
@@ -254,7 +254,7 @@ fn reuse_joint_carries_arm_statistics_forward() {
     assert!(searcher.reuse_joint(&played));
     let root = searcher.tree().expect("the promoted node is the new root");
     assert_eq!(root.kind(), NodeKind::Root);
-    assert!(root.choice().is_none());
+    assert_eq!(root.edge(), Edge::Root);
     assert_eq!(root.visits(), carried);
     assert_eq!(
         arms(root),

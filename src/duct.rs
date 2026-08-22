@@ -15,8 +15,8 @@
 //! possible: it depends on a floor that has already decayed by then.
 //!
 //! They also read different [`crate::Config`] fields —
-//! [`crate::Config::duct_exploration`] and
-//! [`crate::Config::regret_matching_exploration`] — because a UCB1 constant on
+//! [`crate::SimultaneousConfig::duct_exploration`] and
+//! [`crate::SimultaneousConfig::regret_matching_exploration`] — because a UCB1 constant on
 //! the reward scale and a sampling probability are not the same number. The
 //! measurements behind that split are on those two doc comments.
 
@@ -24,6 +24,7 @@ use rand_core::Rng;
 
 use crate::game::{Rewards, SimultaneousPolicy};
 use crate::node::{JointKey, Simul};
+use crate::select::ucb_raw;
 use crate::util::{below, uniform_01};
 
 /// Fraction of the reward span within which two arm values count as tied.
@@ -207,10 +208,23 @@ fn select_duct<C, R: Rng + ?Sized>(
     let start = range.start;
     let tol = TIE_TOLERANCE * span;
 
+    // `ucb_raw`, not a second copy of the formula. `select.rs` keeps it as one
+    // function precisely so two callers can never drift apart on it, and an arm
+    // is the same bandit as a child scored against its own availability. The
+    // progressive-bias term is passed off rather than omitted: `heuristic_bias`
+    // describes a state, so at a simultaneous node it would describe a joint
+    // successor while selection here scores one player's arms. A zero weight
+    // makes the term identically zero and the constant folds away.
     let score = |a: usize| -> f64 {
         let arm = &simul.arm_stats[a];
-        let visits = arm.visits as f64;
-        arm.cumulative_reward / visits + exploration * (arm.ln_availability / visits).sqrt()
+        ucb_raw(
+            arm.cumulative_reward,
+            arm.visits as f64,
+            arm.ln_availability,
+            exploration,
+            0.0,
+            0.0,
+        )
     };
 
     let mut unvisited = 0u64;
@@ -709,11 +723,11 @@ mod tests {
     /// would not get. This is the whole point: the floor schedule these tests
     /// exercise is the one `Config::default()` hands out.
     fn floor() -> f64 {
-        Config::default().regret_matching_exploration
+        Config::default().simultaneous.regret_matching_exploration
     }
 
     fn ucb() -> f64 {
-        Config::default().duct_exploration
+        Config::default().simultaneous.duct_exploration
     }
     /// Upper tail of chi-square at p = 0.001 with three degrees of freedom.
     const CHI2_3DF: f64 = 16.266;
@@ -1147,8 +1161,8 @@ mod tests {
         let mut counts = [0u64; 4];
         let mut rng = WyRand::seed_from_u64(0xD0C7);
         for _ in 0..draws {
-            let (arm, prob) =
-                select_marginal(simul, 0, 0, DUCT, ucb(), 1.0, &mut rng).expect("every arm is legal");
+            let (arm, prob) = select_marginal(simul, 0, 0, DUCT, ucb(), 1.0, &mut rng)
+                .expect("every arm is legal");
             assert_eq!(prob, 1.0, "Duct does no importance weighting");
             counts[arm as usize] += 1;
         }
@@ -1293,6 +1307,4 @@ mod tests {
             "{observed:?} against {expected:?}, chi2 {chi2}"
         );
     }
-
-
 }

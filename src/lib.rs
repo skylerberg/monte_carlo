@@ -56,8 +56,8 @@ mod parallel;
 pub use rand_core;
 
 pub use game::{Game, JointChoices, PlayerSet, PlayerSetIter, Rewards, SimultaneousPolicy, Status};
-pub use node::{Marginals, Node, NodeKind};
-pub use search::{Config, RootPolicy, SearchResult, Searcher, StopReason};
+pub use node::{Edge, Marginals, Node, NodeKind};
+pub use search::{Config, RootPolicy, SearchResult, Searcher, SimultaneousConfig, StopReason};
 
 #[cfg(feature = "parallel")]
 pub use parallel::RootParallel;

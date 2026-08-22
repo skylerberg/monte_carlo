@@ -21,7 +21,7 @@ fn config(iterations: u32) -> Config {
 fn visit_vector(root: &Node<usize>) -> Vec<(usize, u32)> {
     root.children()
         .iter()
-        .map(|child| (*child.choice().unwrap(), child.visits()))
+        .map(|child| (*child.edge().choice().unwrap(), child.visits()))
         .collect()
 }
 
@@ -114,7 +114,7 @@ fn reused_subtree_carries_its_statistics_forward() {
         .unwrap()
         .children()
         .iter()
-        .find(|child| *child.choice().unwrap() == first.choice)
+        .find(|child| *child.edge().choice().unwrap() == first.choice)
         .unwrap()
         .visits();
     assert!(carried > 0);
@@ -220,7 +220,7 @@ fn wide_nodes_track_every_child() {
     let mut seen: Vec<usize> = root
         .children()
         .iter()
-        .map(|child| *child.choice().unwrap())
+        .map(|child| *child.edge().choice().unwrap())
         .collect();
     seen.sort_unstable();
     seen.dedup();

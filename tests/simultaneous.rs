@@ -18,8 +18,8 @@ mod common;
 use common::*;
 use mcts::rand_core::{Rng, SeedableRng};
 use mcts::{
-    Config, Game, JointChoices, NodeKind, PlayerSet, RootPolicy, SearchResult, Searcher,
-    SimultaneousPolicy, Status, StopReason,
+    Config, Edge, Game, JointChoices, NodeKind, PlayerSet, RootPolicy, SearchResult, Searcher,
+    SimultaneousConfig, SimultaneousPolicy, Status, StopReason,
 };
 use wyrand::WyRand;
 
@@ -328,8 +328,7 @@ impl Game for DominantPair {
     }
 
     fn apply_joint<R: Rng + ?Sized>(&mut self, _: &(), joint: JointChoices<'_, u8>, _: &mut R) {
-        self.payoff =
-            Some(DOMINANT_PAIR_PAYOFFS[*joint.get(0) as usize][*joint.get(1) as usize]);
+        self.payoff = Some(DOMINANT_PAIR_PAYOFFS[*joint.get(0) as usize][*joint.get(1) as usize]);
     }
 
     fn rollout<R: Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 2] {
@@ -377,9 +376,7 @@ fn both_policies_commit_to_a_pure_equilibrium() {
         let mut searcher = Searcher::new(&game);
         searcher.search(&game, &(), player, &config(20_000), None, &mut rng(5));
         let root = searcher.tree().expect("the search retained its tree");
-        let marginals = root
-            .marginals(player)
-            .expect("the player acts at the root");
+        let marginals = root.marginals(player).expect("the player acts at the root");
         let visits: u32 = (0..marginals.len()).map(|arm| marginals.visits(arm)).sum();
         let top = marginals.most_visited().expect("some arm was selected");
         assert_eq!(
@@ -696,18 +693,19 @@ fn a_mixed_tree_searches_both_kinds_of_node() {
     // A plain `u8` throughout: no enum wrapper anywhere, checked by the
     // compiler rather than by an assertion.
     let _: &u8 = root.children()[0]
+        .edge()
         .choice()
         .expect("a root child has a choice");
 
     let branch_a = root
         .children()
         .iter()
-        .find(|child| *child.choice().unwrap() == BRANCH_A)
+        .find(|child| *child.edge().choice().unwrap() == BRANCH_A)
         .expect("branch A was expanded");
     let branch_b = root
         .children()
         .iter()
-        .find(|child| *child.choice().unwrap() == BRANCH_B)
+        .find(|child| *child.edge().choice().unwrap() == BRANCH_B)
         .expect("branch B was expanded");
     assert_eq!(
         branch_a.simultaneous_players(),
@@ -998,7 +996,9 @@ fn a_joint_child_reports_no_single_choice() {
     );
     for child in root.children() {
         assert_eq!(child.kind(), NodeKind::Joint);
-        assert!(child.choice().is_none());
+        // `Edge::Joint`, not merely "carries no choice": a root carries no
+        // choice either, and conflating the two is what `Edge` exists to stop.
+        assert_eq!(child.edge(), Edge::Joint);
         assert_eq!(
             child.reward_player(),
             PERSPECTIVE,
@@ -1095,7 +1095,10 @@ fn same_seed_gives_the_same_simultaneous_search() {
 fn most_visited_root_policy_is_deterministic() {
     let game = BiasedRps::default();
     let cfg = Config {
-        root_policy: RootPolicy::MostVisited,
+        simultaneous: SimultaneousConfig {
+            root_policy: RootPolicy::MostVisited,
+            ..Default::default()
+        },
         ..config(50_000)
     };
     let mut choices = Vec::new();
@@ -1131,7 +1134,10 @@ fn root_parallel_merges_marginals() {
 
     let game = BiasedRps::default();
     let cfg = Config {
-        root_policy: RootPolicy::MostVisited,
+        simultaneous: SimultaneousConfig {
+            root_policy: RootPolicy::MostVisited,
+            ..Default::default()
+        },
         ..config(PER_WORKER)
     };
 
@@ -1216,7 +1222,10 @@ fn a_parallel_simultaneous_root_returns_an_action_the_player_has() {
 
     let game = ForbiddenFavourite::banned();
     let cfg = Config {
-        root_policy: RootPolicy::MostVisited,
+        simultaneous: SimultaneousConfig {
+            root_policy: RootPolicy::MostVisited,
+            ..Default::default()
+        },
         ..config(PER_WORKER)
     };
 
@@ -1277,7 +1286,10 @@ fn early_termination_does_not_change_a_simultaneous_answer() {
 
     let game = Ducted(ForbiddenFavourite::banned());
     let patient = Config {
-        root_policy: RootPolicy::MostVisited,
+        simultaneous: SimultaneousConfig {
+            root_policy: RootPolicy::MostVisited,
+            ..Default::default()
+        },
         ..config(BUDGET)
     };
     let hasty = Config {
@@ -1394,7 +1406,10 @@ fn a_reused_searcher_does_not_carry_a_legality_mask_between_searches() {
     let warmup = Ducted(ForbiddenFavourite::default());
     let game = Ducted(ForbiddenFavourite::banned());
     let patient = Config {
-        root_policy: RootPolicy::MostVisited,
+        simultaneous: SimultaneousConfig {
+            root_policy: RootPolicy::MostVisited,
+            ..Default::default()
+        },
         ..config(BUDGET)
     };
     let hasty = Config {
