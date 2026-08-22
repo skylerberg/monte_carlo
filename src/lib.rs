@@ -22,6 +22,10 @@
 //!   how often its parent was visited.
 //! * **max^n backup** over per-player reward vectors, so any number of players
 //!   and any reward scale work without a zero-sum assumption.
+//! * **Simultaneous moves** via decoupled UCT, with regret matching as the
+//!   default selection rule so that a game with a mixed equilibrium is played
+//!   mixed rather than exploitably. See [`SimultaneousPolicy`] for exactly what
+//!   converges to what, and what determinization does to that claim.
 //! * **Budgets** by iteration count, wall clock, or an external cancellation
 //!   flag, and early termination once the answer provably cannot change.
 //! * **Tree reuse** across moves, and root parallelism behind the `parallel`
@@ -36,6 +40,7 @@
 #![warn(missing_docs)]
 
 mod budget;
+mod duct;
 mod early_stop;
 mod game;
 mod node;
@@ -50,9 +55,9 @@ mod parallel;
 /// crate's `Rng` bounds refer to.
 pub use rand_core;
 
-pub use game::{Game, Rewards, Status};
-pub use node::Node;
-pub use search::{Config, SearchResult, Searcher, StopReason};
+pub use game::{Game, JointChoices, PlayerSet, PlayerSetIter, Rewards, SimultaneousPolicy, Status};
+pub use node::{Marginals, Node, NodeKind};
+pub use search::{Config, RootPolicy, SearchResult, Searcher, StopReason};
 
 #[cfg(feature = "parallel")]
 pub use parallel::RootParallel;

@@ -1,8 +1,8 @@
 [package]
 name = "mcts"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "A generic, allocation-conscious Monte Carlo Tree Search library with Information Set MCTS support."
+description = "A generic, allocation-conscious Monte Carlo Tree Search library with Information Set MCTS and simultaneous-move support."
 license = "MIT OR Apache-2.0"
 
 [features]
@@ -29,6 +29,10 @@ harness = false
 
 [[bench]]
 name = "search"
+harness = false
+
+[[bench]]
+name = "simultaneous"
 harness = false
 
 [profile.release]

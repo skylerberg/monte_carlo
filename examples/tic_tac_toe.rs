@@ -88,6 +88,7 @@ impl Game for TicTacToe {
         loop {
             match self.status(&()) {
                 Status::Terminal(rewards) => return rewards,
+                Status::Simultaneous { .. } => unreachable!(),
                 Status::Active { .. } => {
                     let mut count = 0;
                     for (i, &cell) in self.cells.iter().enumerate() {

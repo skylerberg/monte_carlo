@@ -301,7 +301,7 @@ impl Game for Tiny {
         }
         match self.status(&()) {
             Status::Terminal(rewards) => rewards,
-            Status::Active { .. } => unreachable!(),
+            Status::Active { .. } | Status::Simultaneous { .. } => unreachable!(),
         }
     }
 

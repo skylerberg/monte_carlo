@@ -3,6 +3,12 @@
 use mcts::rand_core::Rng;
 use mcts::{Game, Status};
 
+mod simul;
+// Flat, so a test names `common::BiasedRps`; allowed unused because a test
+// binary that touches no simultaneous fixture would otherwise fail the build.
+#[allow(unused_imports)]
+pub use simul::*;
+
 /// Three choices, three plies deep, everybody always wins. Used to check that
 /// exploration is even when nothing distinguishes the choices.
 #[derive(Clone)]
@@ -235,6 +241,7 @@ impl Game for GameTree {
         loop {
             match self.status(&()) {
                 Status::Terminal(rewards) => return rewards,
+                Status::Simultaneous { .. } => unreachable!(),
                 Status::Active { .. } => {
                     let count = self.state.children.len() as u64;
                     let choice = ((rng.next_u64() as u128 * count as u128) >> 64) as usize;

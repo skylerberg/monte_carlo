@@ -19,3 +19,14 @@ pub(crate) fn hash_of<T: Hash + ?Sized>(value: &T) -> u64 {
     value.hash(&mut hasher);
     hasher.finish()
 }
+
+/// Uniform `f64` in `[0, 1)`.
+///
+/// The top 53 bits scaled by `2^-53`, which is every value f64 can represent
+/// in that interval without a gap. Dividing a whole 64-bit draw by `u64::MAX`
+/// would instead round the largest draws to exactly `1.0`, and an inverse-CDF
+/// sampler handed `1.0` walks off the end of its distribution.
+#[inline(always)]
+pub(crate) fn uniform_01<R: Rng + ?Sized>(rng: &mut R) -> f64 {
+    (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+}
