@@ -1,6 +1,6 @@
 [package]
 name = "mcts"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "A generic, allocation-conscious Monte Carlo Tree Search library with Information Set MCTS and simultaneous-move support."
 license = "MIT OR Apache-2.0"
@@ -34,6 +34,15 @@ harness = false
 [[bench]]
 name = "simultaneous"
 harness = false
+
+# Tests run optimized. The suite is dominated by search loops — the sequential
+# fingerprint alone runs 405 searches — and at `opt-level = 0` that is minutes
+# per run rather than seconds, which is a cost paid on every edit. Debug
+# assertions stay on: they are what the `ROOT_CHOICES_INVARIANT` and node-kind
+# checks exist for, and running the suite without them would test a different
+# crate.
+[profile.test]
+opt-level = 2
 
 [profile.release]
 lto = true

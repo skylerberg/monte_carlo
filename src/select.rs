@@ -6,8 +6,12 @@ use crate::node::Node;
 /// availability count elsewhere — the Information Set MCTS variant, which stops
 /// a rarely-legal choice from looking under-explored.
 ///
-/// Kept as one function so that `select` and the early-termination simulation
-/// can never disagree about the formula.
+/// Kept as one function so that its callers can never disagree about the
+/// formula. There are three: `select`, the early-termination simulation, and
+/// `duct::select_duct`, which scores a simultaneous node's arms against their
+/// own availability and is the same bandit applied to a different denominator.
+/// It passes a zero bias weight rather than omitting the term — see the comment
+/// at that call site for why the prior has no meaning at a simultaneous node.
 #[inline(always)]
 pub(crate) fn ucb_raw(
     cumulative_reward: f64,

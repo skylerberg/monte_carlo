@@ -70,16 +70,16 @@ children.
 The sampling distribution mixes in a uniform exploration floor, which is what
 bounds that importance weight. It decays as `gamma_0 * t^(-1/4)` in the node's
 own visit count, clamped to `[0.005, 0.5]`, with `gamma_0` set by
-`Config::regret_matching_exploration` (default 0.4). The exponent is load
+`Config::simultaneous.regret_matching_exploration` (default 0.4). The exponent is load
 bearing: for a floor decaying as `t^-a` the average-regret bound goes as
 `T^(a - 1/2) / gamma_0`, so at `a = 1/2` the bound — and the search — stops
-depending on the budget at all. `Config::duct_exploration` (default 0.75) is the
+depending on the budget at all. `Config::simultaneous.duct_exploration` (default 0.75) is the
 separate UCB1 constant `Duct` reads; a sampling probability and a rate on the
 reward scale are not interchangeable numbers.
 
 At a simultaneous root the search returns the perspective player's **own**
 action, never a joint tuple, sampled by default from the exploration-free,
-availability-normalized average strategy (`Config::root_policy`). A caller who
+availability-normalized average strategy (`Config::simultaneous.root_policy`). A caller who
 does nothing therefore plays a mixed strategy. `Searcher::root_policy_into`
 hands back that whole distribution, renormalized over the actions legal in the
 real position, and `Searcher::reuse_joint` is the tree-reuse entry point once

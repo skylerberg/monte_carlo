@@ -307,6 +307,7 @@ fn a_re_rooted_sequential_root_never_offers_a_child_the_position_withholds() {
         .iter()
         .max_by_key(|child| child.visits())
         .expect("the search expanded the root")
+        .edge()
         .choice()
         .expect("a root child has a choice");
 
@@ -325,7 +326,7 @@ fn a_re_rooted_sequential_root_never_offers_a_child_the_position_withholds() {
     let withheld = promoted
         .children()
         .iter()
-        .position(|child| child.choice() == Some(&EDGE))
+        .position(|child| child.edge().choice() == Some(&EDGE))
         .expect(
             "the promoted node never saw the withheld action, so there is no leftover \
              child to mark available and this test proves nothing",
@@ -344,7 +345,7 @@ fn a_re_rooted_sequential_root_never_offers_a_child_the_position_withholds() {
         .expect("a search leaves a tree")
         .children()
         .iter()
-        .find(|child| child.choice() == Some(&EDGE))
+        .find(|child| child.edge().choice() == Some(&EDGE))
         .expect("the leftover child is still there")
         .visits();
     assert_eq!(

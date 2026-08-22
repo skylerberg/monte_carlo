@@ -79,6 +79,27 @@ pub struct Config {
     pub max_reward: f64,
     /// See [`Config::max_reward`].
     pub min_reward: f64,
+    /// The knobs that apply only at a [`Status::Simultaneous`] node.
+    ///
+    /// Grouped rather than flattened so that `Config`'s own fields are the ones
+    /// live for *every* game. A purely sequential game leaves this at its
+    /// default forever and never has to work out which of ten knobs reach it;
+    /// a game with simultaneous nodes gets the three that do, in one place,
+    /// next to each other's measurements.
+    pub simultaneous: SimultaneousConfig,
+}
+
+/// Knobs that take effect only at a [`Status::Simultaneous`] node.
+///
+/// Every field here is dead for a game that never returns
+/// [`Status::Simultaneous`], which is the reason they are not on [`Config`]
+/// beside the knobs that always apply.
+// `Copy` because every field is, and because `Config` is routinely built with
+// `..base` update syntax: a non-`Copy` field there would move out of `base` and
+// partially invalidate a `Config` callers expect to keep using.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SimultaneousConfig {
     /// UCB1's exploration constant at a simultaneous node, under
     /// [`crate::SimultaneousPolicy::Duct`].
     ///
@@ -109,7 +130,7 @@ pub struct Config {
     /// sampling distribution on its first visit.
     ///
     /// A probability, not a rate on the reward scale, which is why it is not
-    /// the same field as [`Config::duct_exploration`]: the two natural values
+    /// the same field as [`SimultaneousConfig::duct_exploration`]: the two natural values
     /// differ by an order of magnitude and share no usable range. The floor
     /// decays from here as `gamma_0 * t^(-1/4)` in that node's own visit count
     /// and is clamped into `[0.005, 0.5]`, so this is the starting value rather
@@ -138,6 +159,14 @@ impl Default for Config {
             early_termination: true,
             max_reward: 1.0,
             min_reward: 0.0,
+            simultaneous: SimultaneousConfig::default(),
+        }
+    }
+}
+
+impl Default for SimultaneousConfig {
+    fn default() -> Self {
+        Self {
             duct_exploration: 0.75,
             regret_matching_exploration: 0.4,
             root_policy: RootPolicy::Sampled,
@@ -145,14 +174,14 @@ impl Default for Config {
     }
 }
 
-impl Config {
+impl SimultaneousConfig {
     /// Whichever exploration field `policy` reads.
     ///
     /// The two are separate fields because a UCB1 constant and a sampling
     /// probability are not interchangeable numbers, and this is the one place
     /// that has to choose between them.
     #[inline]
-    pub(crate) fn simultaneous_exploration(&self, policy: SimultaneousPolicy) -> f64 {
+    pub(crate) fn exploration(&self, policy: SimultaneousPolicy) -> f64 {
         match policy {
             SimultaneousPolicy::Duct => self.duct_exploration,
             SimultaneousPolicy::RegretMatching => self.regret_matching_exploration,
@@ -668,8 +697,9 @@ impl<G: Game> Searcher<G> {
             None => match most_visited(root) {
                 Some(i) => (
                     root.children[i]
+                        .edge()
                         .choice()
-                        .expect("child has a choice")
+                        .expect("a sequential root's children all carry a choice")
                         .clone(),
                     root.children[i].visits(),
                     root.children[i].mean_reward(),
@@ -790,13 +820,11 @@ fn extract_marginal<G: Game, R: Rng + ?Sized>(
             }
         }
         let legal = &scratch.root_legal;
-        match cfg.root_policy {
+        match cfg.simultaneous.root_policy {
             RootPolicy::Sampled => {
                 duct::sample_root_arm(simul, slot, legal, G::SIMULTANEOUS_POLICY, rng)
             }
-            RootPolicy::MostVisited => {
-                duct::best_arm(simul, slot, legal, G::SIMULTANEOUS_POLICY)
-            }
+            RootPolicy::MostVisited => duct::best_arm(simul, slot, legal, G::SIMULTANEOUS_POLICY),
         }
         .map(|arm| {
             let marginals = simul.marginals(slot);
@@ -969,7 +997,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                         slot,
                         epoch,
                         policy,
-                        cfg.simultaneous_exploration(policy),
+                        cfg.simultaneous.exploration(policy),
                         span,
                         rng,
                     ) else {
@@ -1081,7 +1109,13 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
         };
 
         path.push(i as u32);
-        let choice = node.children[i].choice().expect("child has a choice");
+        // The field rather than `Node::edge`: this runs once per level per
+        // iteration, and the kind is already known here — `select` only ever
+        // returns a child that `expand` created from a choice.
+        let choice = node.children[i]
+            .choice
+            .as_ref()
+            .expect("child has a choice");
         state.apply_choice(ctx, choice, rng);
         state.advance(ctx, side, perspective, rng);
 
@@ -1407,7 +1441,10 @@ mod tests {
     fn most_visited_returns_the_perspective_players_own_arm() {
         let game = Rps::<true, false>::default();
         let cfg = Config {
-            root_policy: RootPolicy::MostVisited,
+            simultaneous: SimultaneousConfig {
+                root_policy: RootPolicy::MostVisited,
+                ..Default::default()
+            },
             ..config(2_000)
         };
         let mut searcher = Searcher::new(&game);

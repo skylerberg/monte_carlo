@@ -54,6 +54,74 @@ pub enum NodeKind {
     Joint = 2,
 }
 
+/// What leads to a [`Node`]: the incoming edge, with whatever it carries.
+///
+/// This exists because the obvious signature does not work. An
+/// `Option<&Choice>` has one `None` and this has two distinct cases that carry
+/// no choice — the root, which has no incoming edge, and a joint successor,
+/// which is reached by one action per participant of a simultaneous parent.
+/// Collapsing them means code that walks `children()` and skips `None`
+/// silently skips every joint successor while reading as though it handled
+/// them. Naming the cases makes that skip something a reader writes on purpose.
+pub enum Edge<'a, C> {
+    /// The root. There is no incoming edge.
+    Root,
+    /// Reached by one player's choice.
+    Choice(&'a C),
+    /// Reached by one action per participant of a simultaneous parent. The
+    /// marginal indices live in the parent — see [`Node::joint_arm`].
+    Joint,
+}
+
+// Hand-written rather than derived: `Edge` holds a reference, so it is `Copy`
+// for every `C`, and deriving would bound the impls on `C: Copy` / `C: Clone`
+// and take the trait away from exactly the heap-owning `Choice` types this
+// crate is careful never to clone.
+impl<C> Clone for Edge<'_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for Edge<'_, C> {}
+
+impl<C: core::fmt::Debug> core::fmt::Debug for Edge<'_, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Root => f.write_str("Root"),
+            Self::Joint => f.write_str("Joint"),
+            Self::Choice(choice) => f.debug_tuple("Choice").field(choice).finish(),
+        }
+    }
+}
+
+impl<C: PartialEq> PartialEq for Edge<'_, C> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Root, Self::Root) | (Self::Joint, Self::Joint) => true,
+            (Self::Choice(a), Self::Choice(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl<C: Eq> Eq for Edge<'_, C> {}
+
+impl<'a, C> Edge<'a, C> {
+    /// The choice, if this node was reached by exactly one.
+    ///
+    /// Deliberately not the way to walk `children()`: this `None` still merges
+    /// the root and a joint successor, which is the conflation [`Edge`] exists
+    /// to undo. Reach for it where you already know the kind, and match on the
+    /// variants otherwise.
+    pub fn choice(self) -> Option<&'a C> {
+        match self {
+            Self::Choice(choice) => Some(choice),
+            Self::Root | Self::Joint => None,
+        }
+    }
+}
+
 /// A node's lazily-built side table. A node is either sequential or
 /// simultaneous, never both, so the two possibilities share one allocation and
 /// one pointer.
@@ -307,14 +375,23 @@ impl<C> Node<C> {
         self.cumulative_reward
     }
 
-    /// The choice leading to this node.
+    /// What leads to this node.
     ///
-    /// `None` at the root **and at a joint successor**, which is reached by one
-    /// action per participant rather than by any one choice. Code that walks
-    /// `children()` and skips `None` will silently skip every joint successor —
-    /// check [`Node::kind`] rather than reading `None` as "root".
-    pub fn choice(&self) -> Option<&C> {
-        self.choice.as_ref()
+    /// Three cases, named, because the two that carry no choice are not the
+    /// same case: the root has no incoming edge at all, and a joint successor
+    /// is reached by one action per participant rather than by any single
+    /// choice. Use [`Edge::choice`] only where you already know which kind you
+    /// hold.
+    pub fn edge(&self) -> Edge<'_, C> {
+        match self.kind {
+            NodeKind::Root => Edge::Root,
+            NodeKind::Joint => Edge::Joint,
+            NodeKind::Choice => Edge::Choice(
+                self.choice
+                    .as_ref()
+                    .expect("a node reached by a choice carries it"),
+            ),
+        }
     }
 
     /// This node's expanded children. At a simultaneous node these are the
@@ -1333,6 +1410,6 @@ mod tests {
         assert_eq!(node.children[0].reward_player(), 1);
         assert!(node.reroot_at(&3));
         assert_eq!(node.kind(), NodeKind::Root);
-        assert!(node.choice().is_none());
+        assert_eq!(node.edge(), Edge::Root);
     }
 }
