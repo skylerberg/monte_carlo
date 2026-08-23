@@ -97,14 +97,16 @@ impl Policy for Decoupled {
 
 // ------------------------------------------------------------------ game ----
 
-/// Cyclic rock-paper-scissors: `a` beats the actions just above it and loses to
-/// the ones just below, wrapping, with the diametrically opposite action drawn
-/// at even widths.
+/// One pairwise round of cyclic rock-paper-scissors: `a` beats the actions just
+/// above it and loses to the ones just below, wrapping, with the diametrically
+/// opposite action drawn at even widths.
 ///
-/// Every width's equilibrium is uniform and strictly mixed, which is the
-/// property the bench needs: a game with a pure equilibrium lets regret
+/// Skew-symmetric — `payoff(a, b) + payoff(b, a) == 1` for every pair — and its
+/// two-player equilibrium is uniform and strictly mixed at every width, which is
+/// the property the bench needs: a game with a pure equilibrium lets regret
 /// matching collapse onto one arm, after which its distribution rebuild is
-/// measuring a degenerate case rather than the one the policy exists for.
+/// measuring a degenerate case rather than the one the policy exists for. What
+/// makes that hold above two players is how [`Cyclic`] combines these rounds.
 fn payoff(a: usize, b: usize, width: usize) -> f64 {
     let d = (a + width - b) % width;
     if d == 0 || 2 * d == width {
@@ -119,9 +121,24 @@ fn payoff(a: usize, b: usize, width: usize) -> f64 {
 /// One simultaneous ply and nothing else: no rollout, no hidden state, and a
 /// `u8` choice, so what the bench costs is the decoupled layer itself.
 ///
-/// Participants are arranged in a cycle — each player is scored against the
-/// next one's action — so every participant faces a genuinely mixed problem at
-/// every arity, not just the two-player zero-sum one.
+/// Participants are arranged in a cycle and every player's payoff is what they
+/// take from their successor **less what their predecessor takes from them**.
+/// Those halves telescope around the cycle, so the arity payoffs sum to
+/// `arity / 2` whatever is played and no profile pays everybody at once — which
+/// is what keeps the problem genuinely mixed above two players. At arity 2 the
+/// second term is the first one's mirror and the whole expression collapses to
+/// [`payoff`] itself, so the two-player groups measure exactly the game they
+/// always did.
+///
+/// Scoring each player against their successor alone, which this bench did
+/// first, does not survive three participants: at width 8 that game has 24 pure
+/// equilibria at arity 3 and 152 at arity 4, every one of them paying all three
+/// or four players 1.0 at once. Regret matching then concentrates — measured
+/// strategy entropy 0.64 to 1.27 nats against the 2.08 of a uniform mixture over
+/// eight arms — and the joint-child population collapses with it, to 279 and 501
+/// children against the 487 and 2 722 the constant-sum form builds. That is 1.7x
+/// and 5.4x less tree, and the size of that tree is the quantity `simul_arity`
+/// exists to compare against `simul_arity/2`.
 struct Cyclic<P> {
     width: usize,
     arity: u8,
@@ -187,10 +204,13 @@ impl<P: Policy> Game for Cyclic<P> {
     }
 
     fn apply_joint<R: Rng + ?Sized>(&mut self, _: &(), joint: JointChoices<'_, u8>, _: &mut R) {
-        for slot in 0..joint.len() {
+        let arity = joint.len();
+        for slot in 0..arity {
             let mine = joint[slot] as usize;
-            let next = joint[(slot + 1) % joint.len()] as usize;
-            self.rewards[joint.player_at(slot) as usize] = payoff(mine, next, self.width);
+            let next = joint[(slot + 1) % arity] as usize;
+            let previous = joint[(slot + arity - 1) % arity] as usize;
+            self.rewards[joint.player_at(slot) as usize] =
+                0.5 + (payoff(mine, next, self.width) - payoff(previous, mine, self.width)) / 2.0;
         }
         self.resolved = true;
     }

@@ -59,31 +59,68 @@ cargo bench --bench search -- --warm-up-time 0.5 --measurement-time 2.0
 Recorded at the first commit of the rewrite, as the reference every later change
 is compared against.
 
-| bench | budget | median | iterations/sec |
-|---|---:|---:|---:|
-| `tiny/100k` | 100 000 | 22.4 ms | 4.46 M |
-| `narrow/1000` | 1 000 | 718 µs | 1.39 M |
-| `narrow/10000` | 10 000 | 8.99 ms | 1.11 M |
-| `wide/100` | 300 | 361 µs | 831 K |
-| `wide/400` | 1 200 | 5.56 ms | 216 K |
-| `wide/1600` | 4 800 | 93.6 ms | 51 K |
+| bench | budget | median | iterations/sec | still comparable |
+|---|---:|---:|---:|:--|
+| `tiny/100k` | 100 000 | 22.4 ms | 4.46 M | yes |
+| `narrow/1000` | 1 000 | 718 µs | 1.39 M | **no — fixture corrected** |
+| `narrow/10000` | 10 000 | 8.99 ms | 1.11 M | **no — fixture corrected** |
+| `wide/100` | 300 | 361 µs | 831 K | **no — fixture corrected** |
+| `wide/400` | 1 200 | 5.56 ms | 216 K | **no — fixture corrected** |
+| `wide/1600` | 4 800 | 93.6 ms | 51 K | **no — fixture corrected** |
 
-`narrow` is ~6% slower than first recorded because it now leaves
+`narrow` was ~6% slower than first recorded because it leaves
 `ROOT_CHOICES_INVARIANT` off, which is the correct setting for it: its legal
 choices depend on information that determinization permutes, so the root really
 does have to be re-enumerated every iteration. The earlier number was measured
 with an optimization that is unsound for that game.
 
 `tiny` is the search core with the game removed: **224 ns per iteration**, which
-is the floor everything else sits on top of. `narrow` costs ~4x that, most of it
-in the rollout and the 2 KB state copy, and drifts ~20% slower from 1 000 to
-10 000 iterations as the tree stops fitting in cache.
+is the floor everything else sits on top of. `narrow` cost ~4x that, most of it
+in the rollout and the 2 KB state copy, and drifted ~20% slower from 1 000 to
+10 000 iterations as the tree stopped fitting in cache.
 
-`wide` scales close to linearly in branching factor because every interior visit
-enumerates the whole choice list and each choice owns a heap allocation —
-roughly 7.7 M allocations for the 1 600-wide run. That cost belongs to the game,
-not the search, and it is the single largest thing a game with heap-owning
-choices can fix on its own side.
+`wide` scaled close to linearly in branching factor because every interior visit
+enumerates the whole choice list and each choice owns a heap allocation. That
+cost belongs to the game, not the search, and it is the single largest thing a
+game with heap-owning choices can fix on its own side. The allocation count went
+up with the fixture: counted with a counting global allocator on one `wide/1600`
+search, **12 809 623 allocations** against the 5 131 224 the same search made
+with `ROOT_CHOICES_INVARIANT` on. The 7.7 M this paragraph used to name was
+measured on neither game, and is not a gate.
+
+### Fixture corrections, and why the two groups are no longer comparable
+
+Both fixtures were measuring something other than what their own documentation
+claimed. The corrections change the work each group does, so the medians above
+describe games that no longer exist and **must not be used as a gate** until a
+valid session re-measures them. The evidence below is counts rather than
+timings, which is the one kind of measurement this machine can still produce
+honestly.
+
+* **`narrow` scored a quantity a move barely moves.** Its payoff summed a stride
+  of the 2 KB cell array, of which one move disturbs two bytes, so the three
+  players sat on 1.00 / 0.53 / 0.34 scales — player 0's above the `[0, 1]` range
+  the config declares — and the root's children were 0.00028 apart against a
+  0.064 exploration term. The root therefore dealt its budget out round-robin,
+  `[1259, 1249, 1249, 1249, 1249, 1249, 1248, 1248]` at 10 000 iterations, and
+  the bench timed a uniform tree, which is the one shape a real search does not
+  build. The payoff is now each player's own collected points, centred on the
+  3 530 an average line pays — measured, over the 30 000 leaf evaluations a
+  10 000-iteration search makes — and scaled into `[0, 1]` by a spread wide
+  enough that the clamp reaches only 2.3% of them. The children land 0.13 apart
+  and the same budget falls `[2957, 2759, 1645, 1015, 641, 624, ...]`.
+* **`wide` never reached the child index it sets `CHILD_INDEX_THRESHOLD = 8`
+  to exercise.** The root is the only node in that game wide enough to be
+  indexed, and `ROOT_CHOICES_INVARIANT = true` skips looking its choices up
+  after the first expansion: 4 173 of the group's 5 464 200 `find_child` calls
+  reached the hash index, 0.08% of them, so a slower `HashTable` could not have
+  moved this bench at all. With the flag off the root re-enumerates every
+  iteration and 8 192 073 of 13 652 100 lookups are indexed. Expect the group to
+  get materially slower in absolute terms: it now does the lookups it is named
+  for, and re-enumerating the root costs allocations in proportion. On one
+  `wide/1600` search the flip took allocations from 5 131 224 to 12 809 623 and
+  wall clock from 0.087 s to 0.200 s — a same-session ratio on a loaded machine,
+  not a recorded median, but the 2.5x is far too large to be load.
 
 ### Reading these as a regression gate
 
@@ -98,6 +135,19 @@ other's expense — check `CHILD_INDEX_THRESHOLD` before believing the win.
 calls for: `rps/{10k,100k}` at one `Duct` and one `RegretMatching` point,
 `simul_wide/{8,32,128}` arms per player at arity 2, and `simul_arity/{2,3,4}` at
 eight arms each.
+
+Its `Cyclic` fixture was corrected along with the two above, and for the same
+reason: scoring each player against their successor alone gave the game 24 pure
+equilibria at arity 3 and 152 at arity 4, every one of them paying all three or
+four players 1.0 at once — the degeneracy the fixture's own documentation said
+it avoided. Regret matching concentrated on them (strategy entropy 0.64 to 1.27
+nats against the 2.08 of a uniform mixture over eight arms) and the tree
+collapsed with it, to 279 and 501 joint children where the constant-sum form
+builds 487 and 2 722. `simul_arity/{3,4}` were therefore timing a materially
+smaller tree than `simul_arity/2`, which is the comparison that group exists to
+make. Subtracting what a player's predecessor takes from them makes the payoffs
+sum to `arity / 2` whatever is played; at arity 2 the expression is identical to
+the old one term for term, so `rps` and `simul_wide` are unaffected.
 
 **No number from it is recorded here, and none should be added without a valid
 session.** Every attempt fell inside a window where this machine was carrying

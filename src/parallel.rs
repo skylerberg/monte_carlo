@@ -787,6 +787,89 @@ mod tests {
         }
     }
 
+    /// `G` played under [`SimultaneousPolicy::Duct`] instead of its own policy.
+    ///
+    /// So that a `Duct` merge and a regret-matching merge can be measured on the
+    /// same fixture: a pair that differed in anything else would not be evidence
+    /// about the policy.
+    #[derive(Clone, Default)]
+    struct Ducted<G>(G);
+
+    impl<G: Game> Game for Ducted<G> {
+        type Choice = G::Choice;
+        type Rewards = G::Rewards;
+        type Context = G::Context;
+        type Side = G::Side;
+
+        const ROOT_CHOICES_INVARIANT: bool = G::ROOT_CHOICES_INVARIANT;
+        const CHILD_INDEX_THRESHOLD: usize = G::CHILD_INDEX_THRESHOLD;
+        const SIMULTANEOUS_POLICY: SimultaneousPolicy = SimultaneousPolicy::Duct;
+
+        fn status(&self, ctx: &Self::Context) -> Status<Self::Rewards> {
+            self.0.status(ctx)
+        }
+
+        fn choices_into(&self, ctx: &Self::Context, out: &mut Vec<Self::Choice>) {
+            self.0.choices_into(ctx, out)
+        }
+
+        fn choices_for_into(&self, ctx: &Self::Context, player: u8, out: &mut Vec<Self::Choice>) {
+            self.0.choices_for_into(ctx, player, out)
+        }
+
+        fn apply_choice<R: Rng + ?Sized>(
+            &mut self,
+            ctx: &Self::Context,
+            choice: &Self::Choice,
+            rng: &mut R,
+        ) {
+            self.0.apply_choice(ctx, choice, rng)
+        }
+
+        fn apply_joint<R: Rng + ?Sized>(
+            &mut self,
+            ctx: &Self::Context,
+            joint: JointChoices<'_, Self::Choice>,
+            rng: &mut R,
+        ) {
+            self.0.apply_joint(ctx, joint, rng)
+        }
+
+        fn rollout<R: Rng + ?Sized>(&mut self, ctx: &Self::Context, rng: &mut R) -> Self::Rewards {
+            self.0.rollout(ctx, rng)
+        }
+
+        fn new_buffer(&self) -> Self {
+            Ducted(self.0.new_buffer())
+        }
+
+        fn determinize_into<R: Rng + ?Sized>(
+            &self,
+            dest: &mut Self,
+            ctx: &Self::Context,
+            perspective: u8,
+            rng: &mut R,
+        ) {
+            self.0.determinize_into(&mut dest.0, ctx, perspective, rng)
+        }
+
+        // Forwarded, not defaulted: the default is a no-op, so a wrapper that
+        // omits it silently searches a different game from the one it wraps.
+        fn advance<R: Rng + ?Sized>(
+            &mut self,
+            ctx: &Self::Context,
+            side: &mut Self::Side,
+            perspective: u8,
+            rng: &mut R,
+        ) {
+            self.0.advance(ctx, side, perspective, rng)
+        }
+
+        fn init_side(&self, ctx: &Self::Context, side: &mut Self::Side) {
+            self.0.init_side(ctx, side)
+        }
+    }
+
     /// How many actions [`PermutedTie`] offers each player.
     const PERMUTED_TIE_ACTIONS: u32 = 3;
 
@@ -1104,6 +1187,79 @@ mod tests {
         );
     }
 
+    /// The `Duct` half of the same promise, over four workers.
+    ///
+    /// A pool whose root is simultaneous and whose policy does not mix takes a
+    /// third path through the merge: neither the sampled draw nor the pooled
+    /// strategy's argmax, but the pooled *statistics* ranked by
+    /// [`crate::rank`] — which is what a single `Duct` search reads its own
+    /// answer off. Nothing exercised it over more than one worker, and a merge
+    /// that pooled raw visits instead would be invisible on a fixture where the
+    /// best action is also the most selected one.
+    ///
+    /// [`RareFavourite`] is not that fixture: three iterations in four cannot
+    /// select [`RARE_ACTION`] at all, so it loses the pooled visit count outright
+    /// and wins the ranking on its mean. Both root policies are asked, because
+    /// under `Duct` the per-worker strategy is one-hot and the merge is
+    /// documented to answer them both with the pooled leader.
+    #[test]
+    fn a_duct_merge_ranks_the_pooled_arms() {
+        const THREADS: usize = 4;
+        const BUDGET: u32 = 4_000;
+
+        let game = Ducted(RareFavourite::default());
+        let cfg = Config {
+            simultaneous: SimultaneousConfig {
+                root_policy: RootPolicy::MostVisited,
+                ..Default::default()
+            },
+            ..config(BUDGET)
+        };
+
+        let mut solo = Searcher::new(&game);
+        let single = solo.search(&game, &(), 0, &cfg, None, &mut WyRand::seed_from_u64(97));
+        assert_eq!(
+            single.choice, RARE_ACTION,
+            "a single Duct search ranks its arms by mean reward, so the rare action wins"
+        );
+
+        let mut workers = seeded(THREADS, &game);
+        let merged = workers.search(&game, &(), 0, &cfg, None);
+
+        let (pooled, _) = pooled_arms(&workers, 0);
+        assert_ne!(
+            leader(&pooled) as u8,
+            RARE_ACTION,
+            "the fixture bites only while raw pooled visits rank the best action below \
+             one that is merely offered more often: {pooled:?}"
+        );
+        assert_eq!(
+            merged.choice, single.choice,
+            "one position, one policy, two answers"
+        );
+        assert_eq!(
+            merged.best_visits, pooled[merged.choice as usize],
+            "pooled visits are still what `best_visits` reports"
+        );
+        assert_eq!(merged.root_visits, BUDGET * THREADS as u32);
+
+        // `Sampled` is the default, and under `Duct` there is nothing to sample:
+        // the strategy is one-hot, so the merge reads the same pooled leader.
+        let sampled = Config {
+            simultaneous: SimultaneousConfig {
+                root_policy: RootPolicy::Sampled,
+                ..cfg.simultaneous
+            },
+            ..cfg
+        };
+        let mut drawn = seeded(THREADS, &game);
+        assert_eq!(
+            drawn.search(&game, &(), 0, &sampled, None).choice,
+            merged.choice,
+            "the two root policies read a Duct root differently"
+        );
+    }
+
     /// Two workers that ran the same number of iterations must get the same say
     /// in the merged strategy, however much of their own mass sat on actions
     /// that are not playable in the real position and so never reached the
@@ -1245,6 +1401,29 @@ mod tests {
         );
     }
 
+    /// What `root` holds for the joint action `played`, or `None` if this worker
+    /// never materialized that tuple — the common case at a simultaneous node,
+    /// and not a failure.
+    fn joint_child_visits<C: Clone + Eq + Hash>(root: &Node<C>, played: &[(u8, C)]) -> Option<u32> {
+        (0..root.children().len())
+            .find(|&child| {
+                played.iter().all(|(player, choice)| {
+                    root.joint_arm(child, *player)
+                        .zip(root.marginals(*player))
+                        .is_some_and(|(arm, marginals)| marginals.choice(arm) == choice)
+                })
+            })
+            .map(|child| root.children()[child].visits())
+    }
+
+    /// Every worker holding the tuple is re-rooted at it, and every worker that
+    /// is not drops its tree.
+    ///
+    /// The per-tree form matters because the merged result cannot express the
+    /// claim: `reused_iterations` is one scalar, so one worker of four carrying
+    /// its subtree forward already makes it positive, and restricting
+    /// `reuse_joint` to worker 0 left this test green when it asserted only
+    /// that.
     #[test]
     fn reuse_joint_re_roots_the_workers_holding_the_tuple() {
         let game = TwoRoundRps::default();
@@ -1253,15 +1432,39 @@ mod tests {
 
         let (opponent_arms, _) = pooled_arms(&workers, 1);
         let opponent = leader(&opponent_arms) as u8;
-        workers.reuse_joint(&[(0, first.choice), (1, opponent)]);
-        // Workers that never materialized this tuple drop their trees, which is
-        // the expected case rather than a failure.
-        assert!(workers.trees().count() > 0);
+        let tuple = [(0, first.choice), (1, opponent)];
+
+        let held: Vec<Option<u32>> = workers
+            .trees()
+            .map(|root| joint_child_visits(root, &tuple))
+            .collect();
+        assert_eq!(held.len(), 4, "a worker finished without a tree");
+        assert!(
+            held.iter().filter(|visits| visits.is_some()).count() > 1,
+            "only {} of the four workers materialized {tuple:?}, so this cannot tell a \
+             pool that re-roots every worker from one that re-roots the first",
+            held.iter().filter(|visits| visits.is_some()).count()
+        );
+
+        workers.reuse_joint(&tuple);
+        let carried: Vec<u32> = held.iter().flatten().copied().collect();
+        assert_eq!(
+            workers
+                .trees()
+                .map(|root| root.visits())
+                .collect::<Vec<_>>(),
+            carried,
+            "the workers holding {tuple:?} held {held:?} for it"
+        );
 
         let mut played = game.clone();
         played.play(first.choice, opponent);
         let second = workers.search(&played, &(), 0, &config(500), None);
-        assert!(second.reused_iterations > 0);
+        assert_eq!(
+            second.reused_iterations,
+            carried.iter().sum::<u32>(),
+            "the merged reuse count is every re-rooted worker's, not one worker's"
+        );
         assert!(second.choice < 3);
     }
 }

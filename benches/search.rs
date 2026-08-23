@@ -51,6 +51,32 @@ const STATE_BYTES: usize = 2048;
 const NARROW_PLIES: u32 = 60;
 const NARROW_PLAYERS: u8 = 3;
 
+/// What an average line pays a player, in points, and how far from it a line has
+/// to land to be worth half the reward scale.
+///
+/// Measured rather than derived, over the 30 000 leaf evaluations a
+/// 10 000-iteration search makes: [`Narrow`]'s rollout keeps the best of four
+/// sampled candidates, so a player's twenty moves collect about 176 points each
+/// rather than the 127.5 a uniform draw would, and a line pays 3 530 with a
+/// standard deviation of 245. Centring the payoff on that mean and scaling by
+/// `NARROW_SPREAD` puts the root's children 0.13 of the reward scale apart,
+/// against the 0.064 exploration term a 10 000-iteration search gives them,
+/// with `score`'s clamp reached by 2.3% of payoffs. Centring it anywhere else
+/// costs that: at 3 270 the mean line was worth 0.79 of the scale and a fifth
+/// of all payoffs were pinned at exactly 1.0, which is the flatness this
+/// constant exists to remove in a weaker form.
+///
+/// That gap is the fixture, not a detail. Scoring the whole cell array — which
+/// this bench did first — measured a quantity a move barely moves: the three
+/// players sat on 1.00 / 0.53 / 0.34 scales, the root's children were 0.00028
+/// apart, and the search dealt its budget out round-robin, `[1259, 1249, 1249,
+/// 1249, 1249, 1249, 1248, 1248]` at 10 000 iterations. A uniform tree is the
+/// one shape a real search does not produce, and player 0's payoffs were above
+/// `Config::max_reward` into the bargain.
+const NARROW_PAR: f64 = 3_530.0;
+/// See [`NARROW_PAR`].
+const NARROW_SPREAD: f64 = 1_100.0;
+
 /// Small branching, three players, and a 2 KB state that copies as one flat
 /// memcpy — the shape of a card game whose collections are all bitsets.
 #[derive(Clone)]
@@ -58,6 +84,8 @@ struct Narrow {
     cells: [u8; STATE_BYTES],
     /// Information the searching player cannot see; reshuffled per iteration.
     hidden: [u8; 64],
+    /// What each player has collected, which is what the payoff is read off.
+    points: [u32; NARROW_PLAYERS as usize],
     ply: u32,
     to_move: u8,
 }
@@ -71,6 +99,7 @@ impl Narrow {
         Self {
             cells,
             hidden: [7; 64],
+            points: [0; NARROW_PLAYERS as usize],
             ply: 0,
             to_move: 0,
         }
@@ -80,14 +109,10 @@ impl Narrow {
         10 + (scramble(self.ply as u64 ^ self.cells[0] as u64) % 31) as usize
     }
 
+    /// Clamped, so the payoffs stay inside the range `config` declares.
     fn score(&self, player: u8) -> f64 {
-        let stride = player as usize + 1;
-        self.cells
-            .iter()
-            .step_by(64 * stride)
-            .map(|&c| c as u32)
-            .sum::<u32>() as f64
-            / 4096.0
+        (0.5 + (f64::from(self.points[player as usize]) - NARROW_PAR) / NARROW_SPREAD)
+            .clamp(0.0, 1.0)
     }
 
     fn rewards(&self) -> [f64; NARROW_PLAYERS as usize] {
@@ -100,6 +125,9 @@ impl Narrow {
 
     fn step(&mut self, choice: u16) {
         let at = (choice as usize * 37) % STATE_BYTES;
+        // Collected before the cell is disturbed, so what a move is worth is a
+        // property of the position the mover found.
+        self.points[self.to_move as usize] += u32::from(self.cells[at]);
         self.cells[at] = self.cells[at].wrapping_add(choice as u8 | 1);
         self.cells[(at + 101) % STATE_BYTES] ^= choice as u8;
         self.ply += 1;
@@ -200,8 +228,16 @@ impl Game for Wide {
 
     // Heap-owning choices cross over sooner; see benchmarks/BASELINE.md.
     const CHILD_INDEX_THRESHOLD: usize = 8;
-    // Perfect information: determinization is a copy, so the root cannot vary.
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    // Off, though this game is perfect information and could set it. The fast
+    // path skips enumerating and looking up the root's choices once the root is
+    // expanded, and the root is the only node here wide enough to be indexed at
+    // all — the rest are progressively expanded and hold a handful of children.
+    // With it on, 4 173 of the group's 5 464 200 `find_child` calls reach the
+    // hash index: 0.08%, the tail of one first expansion, so the threshold above
+    // decides nothing and a slower index could not move this bench. With it off
+    // the root re-enumerates every iteration and 8 192 073 of 13 652 100 are
+    // indexed, which is the wide-node lookup this group is named for.
+    const ROOT_CHOICES_INVARIANT: bool = false;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.ply >= WIDE_PLIES {
