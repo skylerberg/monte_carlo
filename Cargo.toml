@@ -23,6 +23,14 @@ serde = { version = "1", features = ["derive"], optional = true }
 criterion = { version = "0.8", features = ["html_reports"] }
 wyrand = "0.4"
 
+# The crate's one end-to-end sample shipped a debug-build panic on its first
+# line for an entire release, because nothing ever ran it. `test = true` puts
+# its unit tests in `cargo test`; CI runs the binary itself in the dev profile,
+# where the overflow checks that caught it are on.
+[[example]]
+name = "tic_tac_toe"
+test = true
+
 [[bench]]
 name = "child_storage"
 harness = false

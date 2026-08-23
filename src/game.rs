@@ -399,6 +399,16 @@ pub trait Game: Sized {
     ///
     /// `Eq` drives the linear child scan; `Hash` is used only once a node grows
     /// past [`Game::CHILD_INDEX_THRESHOLD`] children.
+    ///
+    /// `Eq` must be full value identity, and that is a real precondition rather
+    /// than a formality: the tree stores the first `Choice` it ever saw for an
+    /// edge and thereafter replays *that value* into [`Game::apply_choice`] and
+    /// [`Game::apply_joint`], and returns it as
+    /// [`crate::SearchResult::choice`]. So a lawful but coarser `Eq` — one that
+    /// compares a move while ignoring data the move carries, say the world a
+    /// determinization drew it from — feeds one determinization's data into
+    /// another's state, and hands the caller an answer built for a world they
+    /// are not in.
     type Choice: Clone + Eq + Hash;
 
     /// Usually `[f64; N]` for `N` players.

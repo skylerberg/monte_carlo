@@ -559,9 +559,11 @@ impl<'a, C> Marginals<'a, C> {
     pub fn visits(&self, arm: usize) -> u32;
     /// Iterations at this node in which this action was legal for this player.
     ///
-    /// The exploration term uses this rather than the node's visit count, so an
-    /// action that is rarely legal is not mistaken for an under-explored one — the
-    /// same subset-armed-bandit correction the rest of the crate applies to children.
+    /// This, and not the node's visit count, is what an arm is measured against, so
+    /// an action that is rarely legal is not mistaken for an under-explored one. It
+    /// holds at every simultaneous node, a root included — which is where an arm
+    /// parts company with a child: a root's children are scored against the root's
+    /// own visit count, and only the levels below it use this rule.
     pub fn availability(&self, arm: usize) -> u32;
     /// Mean reward of this arm for its own player, or 0.0 if never selected.
     pub fn mean_reward(&self, arm: usize) -> f64;
@@ -578,15 +580,29 @@ impl<'a, C> Marginals<'a, C> {
     /// Under [`SimultaneousPolicy::RegretMatching`] this is the time-averaged
     /// strategy with the exploration floor already excluded and availability divided
     /// out — the only extraction with a convergence result behind it, and the one to
-    /// sample. Under [`SimultaneousPolicy::Duct`] it is one-hot at the most-selected
-    /// arm, deliberately: decoupled UCB1 converges to a pure policy, and its visit
-    /// distribution is precisely the object an opponent exploits, so this crate will
-    /// not hand it back dressed as a mixed strategy.
+    /// sample. Under [`SimultaneousPolicy::Duct`] it is one-hot at
+    /// [`Marginals::leader`], deliberately: decoupled UCB1 converges to a pure
+    /// policy, and its visit distribution is precisely the object an opponent
+    /// exploits, so this crate will not hand it back dressed as a mixed strategy.
     ///
-    /// It is averaged over every determinization in which each action was legal, so
-    /// a caller holding a narrower legal set should zero the illegal entries and
-    /// renormalize. [`Searcher::root_policy_into`] does that for you.
+    /// It is averaged over every determinization in which each action was legal,
+    /// which is a wider action set than any single position offers. A caller holding
+    /// a narrower legal set must not zero this vector's illegal entries and
+    /// renormalize: sound under a mixing policy, unsound under `Duct`, where an
+    /// illegal leader leaves nothing but zeros to divide by. Use
+    /// [`Marginals::policy_masked_into`].
     pub fn policy_into(&self, out: &mut Vec<f64>);
+
+    /// [`Marginals::policy_into`] restricted to the arms legal in the real position
+    /// and normalized over them. `legal` must be parallel to the arms — any other
+    /// length panics — and `out` comes back the same length as the arms with a zero at
+    /// every illegal one, summing to 1 unless nothing is legal.
+    ///
+    /// The extraction is re-run over the legal arms rather than rescaled afterwards,
+    /// which is what makes it sound under `Duct`: the leader is recomputed there and
+    /// can be a different action. At a root prefer [`Searcher::root_policy_into`],
+    /// which enumerates the mask itself; below one this is the whole extraction.
+    pub fn policy_masked_into(&self, legal: &[bool], out: &mut Vec<f64>);
 }
 ```
 
@@ -721,9 +737,15 @@ impl<G: Game> Searcher<G> {
     /// or if `player` does not act there. `out` is cleared first and is a caller
     /// buffer, so repeated calls do not allocate.
     ///
-    /// This is [`Marginals::policy_into`] renormalized against the real position
-    /// rather than against the union of every determinization, which is the only
-    /// sound extraction when a player's legal set varies between worlds.
+    /// This runs the same body [`Marginals::policy_masked_into`] does, over the same
+    /// arms, with the mask enumerated from `state` and the arms named as choices: the
+    /// extraction re-run against the real position rather than against the union of
+    /// every determinization, which is the only sound one when a player's legal set
+    /// varies between worlds. It is not [`Marginals::policy_into`] rescaled: under
+    /// `Duct` that vector is one-hot over every arm the tree holds, so masking it
+    /// would divide by zero whenever the leader is illegal here. The two part company
+    /// only where no arm is legal at all: the masked vector is then all zeros, and
+    /// this falls back to the uniform over `state`'s own choice list.
     pub fn root_policy_into(
         &self,
         state: &G,
@@ -1568,6 +1590,15 @@ rather than implied away.
 
 `Marginals::policy_into` computes the same thing over *all* arms (no legality filter,
 since a `Marginals` view has no position to filter against) and says so in its doc.
+`Marginals::policy_masked_into` is that same extraction with the filter supplied by the
+caller, which is the only sound one under `Duct`, where masking the output afterwards
+normalizes a vector of zeros whenever the leading arm is illegal in the position. It is
+the same code and not merely the same rule: `duct::strategy_into` takes the arm slices,
+`Searcher::root_policy_into` and `Marginals::policy_masked_into` both call it, and
+`duct::root_weight`'s "cannot drift apart" guarantee therefore covers the masked
+marginal too. The one thing the root form adds is the disjoint fallback — where no arm
+is legal it reports a uniform over the position's own choice list, which a `Marginals`
+has no way to see.
 
 ---
 

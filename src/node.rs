@@ -1172,10 +1172,14 @@ impl<'a, C> Marginals<'a, C> {
 
     /// Iterations at this node in which this action was legal for this player.
     ///
-    /// The exploration term uses this rather than the node's visit count, so an
-    /// action that is rarely legal is not mistaken for an under-explored one —
-    /// the same subset-armed-bandit correction the rest of the crate applies to
-    /// children.
+    /// This, and not the node's visit count, is what an arm is measured
+    /// against, so an action that is rarely legal is not mistaken for an
+    /// under-explored one: [`crate::SimultaneousPolicy::Duct`] takes its
+    /// exploration denominator from it, and the average strategy
+    /// [`Marginals::policy_into`] reports divides by it. It holds at every
+    /// simultaneous node, a root included — which is where an arm parts company
+    /// with a child, since a root's children are scored against the root's own
+    /// visit count and only the levels below it use this rule.
     pub fn availability(&self, arm: usize) -> u32 {
         self.stats[arm].availability
     }
@@ -1204,13 +1208,7 @@ impl<'a, C> Marginals<'a, C> {
     /// The right answer only where the equilibrium is pure. See
     /// [`Marginals::policy_into`].
     pub fn leader(&self) -> Option<usize> {
-        crate::rank::leader_of(self.stats.iter().enumerate().map(|(i, arm)| {
-            (
-                i,
-                crate::rank::Candidate::new(arm.visits, arm.availability, arm.cumulative_reward),
-            )
-        }))
-        .map(|(i, _)| i)
+        crate::duct::leader_over(self.stats, None)
     }
 
     /// Index of the most-selected arm, first maximum so ties break
@@ -1244,38 +1242,45 @@ impl<'a, C> Marginals<'a, C> {
     /// crate will not hand it back dressed as a mixed strategy.
     ///
     /// It is averaged over every determinization in which each action was
-    /// legal, so a caller holding a narrower legal set should zero the illegal
-    /// entries and renormalize. [`crate::Searcher::root_policy_into`] does that
-    /// for you.
+    /// legal, which is a wider action set than any single position offers. A
+    /// caller holding a narrower legal set must not zero this vector's illegal
+    /// entries and renormalize: that is sound under a mixing policy and unsound
+    /// under [`crate::SimultaneousPolicy::Duct`], where the vector is one-hot
+    /// at the leader over *every* arm the tree holds, so an illegal leader
+    /// leaves nothing but zeros to divide by. Use
+    /// [`Marginals::policy_masked_into`], which re-runs the extraction over the
+    /// legal arms instead of rescaling this one — the same thing
+    /// [`crate::Searcher::root_policy_into`] does at a root, where it can also
+    /// build the mask from the position itself.
     pub fn policy_into(&self, out: &mut Vec<f64>) {
-        out.clear();
-        if self.stats.is_empty() {
-            return;
-        }
+        crate::duct::strategy_into(self.stats, self.policy, None, self.mixes, out);
+    }
 
-        if self.mixes {
-            let mut total = 0.0;
-            for (i, arm) in self.stats.iter().enumerate() {
-                // A mean probability conditional on being legal: the numerator
-                // only accumulated on iterations the denominator counts.
-                let weight = self.policy[i].strategy_sum.max(0.0) / arm.availability.max(1) as f64;
-                out.push(weight);
-                total += weight;
-            }
-            if total > 0.0 {
-                for weight in out.iter_mut() {
-                    *weight /= total;
-                }
-                return;
-            }
-        } else if let Some(best) = self.leader() {
-            out.resize(self.stats.len(), 0.0);
-            out[best] = 1.0;
-            return;
-        }
-
-        out.clear();
-        out.resize(self.stats.len(), 1.0 / self.stats.len() as f64);
+    /// [`Marginals::policy_into`] restricted to the arms legal in the real
+    /// position, and normalized over them.
+    ///
+    /// `legal` must be parallel to the arms — a mask of any other length panics
+    /// — and is built by looking this player's legal actions up against
+    /// [`Marginals::choice`]. `out` comes back the same length as the arms with
+    /// a zero at every illegal one, summing to 1 unless nothing is legal, in
+    /// which case it is all zeros and the tree has no move to offer here.
+    ///
+    /// This is the extraction to use whenever the arms outrun the position,
+    /// which determinization makes the normal case, and it is the only sound
+    /// one under [`crate::SimultaneousPolicy::Duct`]: the leader is recomputed
+    /// over the legal arms rather than found first and masked away afterwards.
+    /// At a root, prefer [`crate::Searcher::root_policy_into`], which
+    /// enumerates the mask for you and hands back `(choice, probability)`
+    /// pairs; below one, this is the whole extraction. The two run the same
+    /// body over the same arms, so they are one extraction rather than two that
+    /// agree.
+    pub fn policy_masked_into(&self, legal: &[bool], out: &mut Vec<f64>) {
+        assert_eq!(
+            legal.len(),
+            self.stats.len(),
+            "mcts: the legality mask and this player's arms are out of step"
+        );
+        crate::duct::strategy_into(self.stats, self.policy, Some(legal), self.mixes, out);
     }
 }
 
@@ -1593,6 +1598,74 @@ mod tests {
         assert_eq!(out.iter().sum::<f64>(), 1.0);
         assert_eq!(simul.marginals(0).most_visited(), Some(1));
         assert_eq!(simul.marginals(1).most_visited(), None);
+    }
+
+    /// The masking recipe `policy_into` used to document — zero that vector's
+    /// illegal entries and renormalize — normalizes `[0, 0, 0]` by 0.0 whenever
+    /// a `Duct` leader is not on offer in the real position. The masked
+    /// extraction re-ranks over the legal arms instead, which can name a
+    /// different action and never a NaN.
+    #[test]
+    fn a_masked_pure_policy_re_ranks_rather_than_rescales() {
+        let mut simul = simul_of(PlayerSet::first_n(2), &[&[1, 2, 3], &[4, 5]], false);
+        for (arm, reward) in simul.arm_stats.iter_mut().zip([20.0, 36.0, 28.0]) {
+            arm.visits = 40;
+            arm.availability = 40;
+            arm.cumulative_reward = reward;
+        }
+
+        let marginals = simul.marginals(0);
+        let mut out = Vec::new();
+        marginals.policy_into(&mut out);
+        assert_eq!(out, vec![0.0, 1.0, 0.0], "one-hot at the best mean");
+
+        marginals.policy_masked_into(&[true, false, true], &mut out);
+        assert_eq!(out, vec![0.0, 0.0, 1.0]);
+        assert_eq!(out.iter().sum::<f64>(), 1.0);
+
+        // No legal arm is a tree with nothing to say about the position, which
+        // is a real state at a low budget and not a division by zero.
+        marginals.policy_masked_into(&[false, false, false], &mut out);
+        assert_eq!(out, vec![0.0; 3]);
+    }
+
+    #[test]
+    fn a_masked_mixed_policy_renormalizes_over_the_legal_arms() {
+        let mut simul = simul_of(PlayerSet::first_n(2), &[&[1, 2, 3], &[4, 5]], true);
+        for arm in simul.arm_stats.iter_mut() {
+            arm.availability = 4;
+        }
+        for (i, arm) in simul.arm_policy.iter_mut().enumerate() {
+            arm.strategy_sum = i as f64 + 1.0;
+        }
+
+        let mut out = Vec::new();
+        simul
+            .marginals(0)
+            .policy_masked_into(&[true, false, true], &mut out);
+        // Mass 1 and 3 over a common availability, and nothing on the arm the
+        // position withholds.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1], 0.0);
+        assert!((out[0] - 0.25).abs() < 1e-12);
+        assert!((out[2] - 0.75).abs() < 1e-12);
+
+        // Legal arms that carry no mass fall back to uniform over them — the
+        // same draw the search itself makes in that state.
+        let fresh = simul_of(PlayerSet::first_n(2), &[&[1, 2, 3], &[4]], true);
+        fresh
+            .marginals(0)
+            .policy_masked_into(&[false, true, true], &mut out);
+        assert_eq!(out, vec![0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of step")]
+    fn a_mask_must_be_parallel_to_the_arms() {
+        let simul = simul_of(PlayerSet::first_n(2), &[&[1, 2, 3], &[4, 5]], true);
+        simul
+            .marginals(0)
+            .policy_masked_into(&[true, true], &mut Vec::new());
     }
 
     #[test]

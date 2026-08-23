@@ -64,6 +64,13 @@ pub enum RootPolicy {
 pub struct Config {
     /// Total visits the root should reach, counting any reused from a retained
     /// tree. Zero means run until `time_limit_ms` expires.
+    ///
+    /// One of the two is required: [`Searcher::search`] refuses a config with
+    /// neither. A cancellation flag cuts a budget short and is not one itself,
+    /// because it is polled inside a loop that some budget has to start, so
+    /// "run until cancelled" is spelled `u32::MAX` here — at the price of
+    /// [`Config::early_termination`], whose proof compares the iterations left
+    /// against the evidence bar and never fires against a budget that large.
     pub iterations: u32,
     /// Wall-clock budget. Requires the `time` feature.
     pub time_limit_ms: Option<u64>,
@@ -98,9 +105,12 @@ pub struct Config {
     /// [`StopReason::Budget`]; turning this on costs a branch per iteration and
     /// buys nothing there. A branch and not a scan: while more iterations are
     /// left than the evidence bar is high, no rival can be out of reach and the
-    /// pass over the root's candidates is skipped without being made. Only applies when `iterations` is non-zero, and a
-    /// search that spends its whole budget reports [`StopReason::Budget`]
-    /// rather than [`StopReason::Proven`].
+    /// pass over the root's candidates is skipped without being made. Only
+    /// applies when `iterations` is non-zero, and a search that spends its whole
+    /// budget reports [`StopReason::Budget`] rather than
+    /// [`StopReason::Proven`]. It is switched off in practice by an
+    /// `iterations: u32::MAX` run-until-cancelled budget, for the same reason:
+    /// the iterations left are always more than the bar is high.
     pub early_termination: bool,
     /// Bounds of the reward scale. Set these to your game's actual range —
     /// both bounds, and neither wider than the payoffs really are.
@@ -687,10 +697,21 @@ impl<G: Game> Searcher<G> {
     /// position's own legal set, and `&self` means enumerating it into a
     /// temporary rather than into the search's scratch.
     ///
-    /// This is [`crate::Marginals::policy_into`] renormalized against the real
-    /// position rather than against the union of every determinization, which is
-    /// the only sound extraction when a player's legal set varies between
-    /// worlds.
+    /// This runs the same body [`crate::Marginals::policy_masked_into`] does,
+    /// over the same arms, with the mask enumerated from `state` and the arms
+    /// named as choices: the extraction re-run against the real position rather
+    /// than against the union of every determinization, which is the only sound
+    /// one when a player's legal set varies between worlds. It is deliberately
+    /// *not* [`crate::Marginals::policy_into`] rescaled: under
+    /// [`crate::SimultaneousPolicy::Duct`] that vector is one-hot at the leader
+    /// over every arm the tree holds, so masking it would divide by zero
+    /// whenever the leader is illegal here, and the leader recomputed over the
+    /// legal arms can be a different action.
+    ///
+    /// The two part company in exactly one place, and it is the disjoint case
+    /// above: where no arm is legal the masked vector is all zeros, having
+    /// nothing but arms to report, while this call falls back to the uniform
+    /// over `state`'s own choice list.
     pub fn root_policy_into(
         &self,
         state: &G,
