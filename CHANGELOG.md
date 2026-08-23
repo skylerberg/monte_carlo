@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+* **`StopReason::Proven` now means what it says.** The early-termination proof
+  is the conserved-visit bound and nothing else: one iteration adds one visit to
+  one candidate, so a candidate behind by more visits than there are iterations
+  left cannot draw level. The adversarial UCB1 replay that used to run at a
+  sequential root every 1024 visits is gone. It was not an upper bound — it paid
+  every challenger the maximum reward in a single replay, so challengers
+  competed with each other for a budget the question asks about one at a time —
+  and it modelled only the children that existed when it ran, so a choice a
+  later determinization first offered could be proven away before it appeared.
+  Both returned a move the same search with `early_termination: false` does not.
+  Deleting it also removes the replay's cost, which measured tens to hundreds of
+  times the search's own selection work.
+* **A search that spends its budget reports `StopReason::Budget`.** `settled`
+  answered "nothing can change" whenever the root had reached `target`, and it
+  is asked at the end of the iteration that gets there, so the loop broke
+  `Proven` before its own budget test could run. Under the default config every
+  full-budget sequential search reported `Proven`, and `Budget` was unreachable.
+* **A `RootParallel` merge over more than one worker no longer reports
+  `StopReason::Proven`.** A worker proves that the argmax of its own tree cannot
+  be overtaken; the merged answer is an argmax over pooled statistics that proof
+  never saw, and a worker that stopped early contributed fewer visits to the
+  pool. `early_termination` still stops individual workers — at a pooled root it
+  trades merged-answer stability for wall clock.
+
 * **A forced move no longer leaves last turn's tree armed.** `Searcher::search`
   now consumes `tree_is_current` with `mem::take` as its first statement,
   instead of clearing it on its last line. A `StopReason::SingleChoice` return,

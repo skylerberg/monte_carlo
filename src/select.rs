@@ -7,11 +7,11 @@ use crate::node::Node;
 /// a rarely-legal choice from looking under-explored.
 ///
 /// Kept as one function so that its callers can never disagree about the
-/// formula. There are three: `select`, the early-termination simulation, and
-/// `duct::select_duct`, which scores a simultaneous node's arms against their
-/// own availability and is the same bandit applied to a different denominator.
-/// It passes a zero bias weight rather than omitting the term — see the comment
-/// at that call site for why the prior has no meaning at a simultaneous node.
+/// formula. There are two: `select`, and `duct::select_duct`, which scores a
+/// simultaneous node's arms against their own availability and is the same
+/// bandit applied to a different denominator. It passes a zero bias weight
+/// rather than omitting the term — see the comment at that call site for why
+/// the prior has no meaning at a simultaneous node.
 #[inline(always)]
 pub(crate) fn ucb_raw(
     cumulative_reward: f64,

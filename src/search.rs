@@ -68,12 +68,14 @@ pub struct Config {
     /// node loses the term at exactly those nodes, silently.
     pub progressive_bias_weight: f64,
     /// Stop early once the remaining iterations provably cannot change the
-    /// chosen move. Only applies when `iterations` is non-zero.
+    /// chosen move: the leader's visit margin over every rival exceeds them, so
+    /// no rival can draw level. Only applies when `iterations` is non-zero, and
+    /// a search that spends its whole budget reports [`StopReason::Budget`]
+    /// rather than [`StopReason::Proven`].
     pub early_termination: bool,
-    /// Bounds of the reward scale, used by the early-termination proof. Set
-    /// these to your game's actual range — the proof is unsound otherwise.
+    /// Bounds of the reward scale. Set these to your game's actual range.
     ///
-    /// They are load-bearing at a simultaneous node too, and in a way worth
+    /// They are load-bearing at a simultaneous node, and in a way worth
     /// spelling out because the default range is `[0, 1]` and a zero-sum game
     /// paying in `[-1, 1]` is the likeliest thing to meet it. Regret matching
     /// *clamps* payoffs into `[0, 1]` before touching a regret. It does not
@@ -201,13 +203,20 @@ impl SimultaneousConfig {
 pub enum StopReason {
     /// Only one legal choice; no search was run.
     SingleChoice,
-    /// The iteration budget was reached.
+    /// The iteration budget was reached, or a `RootParallel` merge over more
+    /// than one worker declined to inherit a worker's proof — in which case
+    /// `iterations_used` is below the pooled budget.
     Budget,
     /// The wall-clock budget expired.
     Deadline,
     /// The cancellation flag was set.
     Cancelled,
-    /// The remaining iterations could not have changed the answer.
+    /// The remaining iterations could not have changed the answer: the chosen
+    /// move led by more visits than there were iterations left to spend. A
+    /// search that exhausted its budget reports `Budget`, and a `RootParallel`
+    /// merge over more than one worker never reports this — the proof is about
+    /// one worker's tree, and the merged answer is read off statistics that
+    /// proof never saw.
     Proven,
 }
 
@@ -589,9 +598,9 @@ impl<G: Game> Searcher<G> {
     /// and this call panics if `perspective` is not one of the acting players.
     /// [`Config::early_termination`] has no effect at a simultaneous root under
     /// [`crate::SimultaneousPolicy::RegretMatching`] and [`StopReason::Proven`]
-    /// cannot occur there: the proof replays UCB1, which is not the rule being
-    /// run, and for a sampled answer proving the leader cannot be overtaken
-    /// proves nothing about what comes back.
+    /// cannot occur there: the proof is about the most-visited candidate, and
+    /// for a sampled answer proving that candidate cannot be overtaken proves
+    /// nothing about what comes back.
     pub fn search<R: Rng + ?Sized>(
         &mut self,
         state: &G,
@@ -748,7 +757,7 @@ impl<G: Game> Searcher<G> {
                 if root_players.is_some() {
                     refresh_root_legal(root, state, ctx, scratch, perspective);
                 }
-                if early_stop::settled::<G>(root, perspective, target, cfg, &scratch.root_legal) {
+                if early_stop::settled::<G>(root, perspective, target, &scratch.root_legal) {
                     break StopReason::Proven;
                 }
             }

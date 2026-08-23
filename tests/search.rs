@@ -768,3 +768,265 @@ fn early_termination_does_not_change_the_answer() {
     assert_eq!(stopped.choice, full);
     assert!(stopped.root_visits <= 400);
 }
+
+/// A one-ply root whose third choice only becomes legal once `UNLOCK_AT`
+/// determinizations have been drawn — a choice the search cannot see yet, which
+/// is the ordinary shape of an information set when the card that permits a
+/// move is only sometimes in the deck's top half.
+#[derive(Clone)]
+struct LateChoice {
+    drawn: std::rc::Rc<std::cell::Cell<u32>>,
+    unlocked: bool,
+    played: Option<usize>,
+}
+
+impl LateChoice {
+    const UNLOCK_AT: u32 = 1_024;
+    const PAYOFFS: [f64; 3] = [0.9, 0.0, 1.0];
+
+    fn new() -> Self {
+        Self {
+            drawn: std::rc::Rc::new(std::cell::Cell::new(0)),
+            unlocked: false,
+            played: None,
+        }
+    }
+}
+
+impl mcts::Game for LateChoice {
+    type Choice = usize;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> mcts::Status<[f64; 2]> {
+        match self.played {
+            Some(choice) => {
+                let payoff = Self::PAYOFFS[choice];
+                mcts::Status::Terminal([payoff, 1.0 - payoff])
+            }
+            None => mcts::Status::Active { player: 0 },
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+        out.extend([0, 1]);
+        if self.unlocked {
+            out.push(2);
+        }
+    }
+
+    fn apply_choice<R: mcts::rand_core::Rng + ?Sized>(
+        &mut self,
+        _: &(),
+        choice: &usize,
+        _: &mut R,
+    ) {
+        self.played = Some(*choice);
+    }
+
+    fn rollout<R: mcts::rand_core::Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 2] {
+        if self.played.is_none() {
+            let width: u64 = if self.unlocked { 3 } else { 2 };
+            let choice = ((rng.next_u64() as u128 * width as u128) >> 64) as usize;
+            self.apply_choice(&(), &choice, rng);
+        }
+        match self.status(&()) {
+            mcts::Status::Terminal(rewards) => rewards,
+            _ => unreachable!("one choice ends the game"),
+        }
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: mcts::rand_core::Rng + ?Sized>(
+        &self,
+        dest: &mut Self,
+        _: &(),
+        _: u8,
+        _: &mut R,
+    ) {
+        dest.clone_from(self);
+        self.drawn.set(self.drawn.get() + 1);
+        dest.unlocked = self.drawn.get() > Self::UNLOCK_AT;
+    }
+}
+
+/// Runs one early-terminating search, checks any proof it reports against the
+/// conserved-visit bound — one iteration adds one visit to one child, so a
+/// child `gap` behind needs `gap` iterations to draw level — and reports
+/// whether it proved at all, so a caller can tell a bound that held from one
+/// that was never tested.
+fn proved_early<G>(name: &str, game: &G, budget: u32, seed: u64) -> bool
+where
+    G: mcts::Game<Choice = usize, Context = ()>,
+{
+    let cfg = Config {
+        early_termination: true,
+        ..config(budget)
+    };
+    let mut searcher = Searcher::new(game);
+    let result = searcher.search(game, &(), 0, &cfg, None, &mut rng(seed));
+    if result.stop_reason != StopReason::Proven {
+        return false;
+    }
+
+    let mut visits: Vec<u32> = searcher
+        .tree()
+        .expect("a search leaves a tree")
+        .children()
+        .iter()
+        .map(|child| child.visits())
+        .collect();
+    visits.sort_unstable_by(|a, b| b.cmp(a));
+    let gap = visits[0] - visits.get(1).copied().unwrap_or(0);
+    let remaining = budget - result.root_visits;
+    assert!(
+        gap > remaining,
+        "{name} seed {seed}: proved after {} of {budget} iterations with the leader \
+         only {gap} visits clear and {remaining} iterations left to spend",
+        result.root_visits
+    );
+    true
+}
+
+/// Nothing weaker than the conserved-visit bound may be stamped
+/// `StopReason::Proven`. A simulation of how the remaining iterations would
+/// probably be spent is a guess about the future, and the guess this crate used
+/// to make was wrong in both directions: it paid every challenger the maximum
+/// reward at once, so challengers competed with each other for a budget the
+/// question asks about one at a time, and it modelled only the children that
+/// existed when it ran.
+#[test]
+fn a_proof_is_never_stronger_than_the_visit_gap() {
+    const BUDGET: u32 = 5_000;
+
+    let mut proofs = 0;
+    for seed in [1u64, 7, 21] {
+        proofs += u32::from(proved_early(
+            "count_to_three",
+            &CountToThree::new(),
+            BUDGET,
+            seed,
+        ));
+        proofs += u32::from(proved_early(
+            "trap",
+            &GameTree::minimal_trap(),
+            BUDGET,
+            seed,
+        ));
+        proofs += u32::from(proved_early("wide200", &GameTree::wide(200), BUDGET, seed));
+        proofs += u32::from(proved_early(
+            "wide_two_ply40",
+            &GameTree::wide_two_ply(40),
+            BUDGET,
+            seed,
+        ));
+    }
+    assert!(
+        proofs > 0,
+        "no search proved anything, so this test compares nothing"
+    );
+}
+
+/// Spending the budget is not a proof. `settled` is asked after the iteration
+/// that brings the root up to `target`, and answering "yes, nothing can change"
+/// there used to break the loop before its own budget test could — making
+/// `StopReason::Budget` unreachable for every sequential search with early
+/// termination on, and `Proven` a false positive on every full-budget one.
+#[test]
+fn a_spent_budget_reports_budget_not_a_proof() {
+    // Three choices that all pay the same, so no gap ever opens and there is
+    // nothing here to prove.
+    let game = AlwaysWin { ply: 0 };
+    let cfg = Config {
+        early_termination: true,
+        ..config(400)
+    };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &(), 1, &cfg, None, &mut rng(1));
+
+    assert_eq!(result.root_visits, 400, "the search must reach its budget");
+    assert_eq!(result.stop_reason, StopReason::Budget);
+}
+
+/// A child that does not exist yet is still a challenger. The conserved-visit
+/// bound covers it — a new child starts from zero, so it needs `gap`
+/// iterations like anyone else — but a simulation over the children present
+/// today cannot see it, and used to prove the answer settled on the last
+/// iteration before the real winner appeared.
+#[test]
+fn a_choice_the_search_has_not_seen_yet_is_not_proven_away() {
+    const BUDGET: u32 = 2_200;
+
+    let answer = |early_termination| {
+        let game = LateChoice::new();
+        let mut searcher = Searcher::new(&game);
+        let cfg = Config {
+            early_termination,
+            ..config(BUDGET)
+        };
+        searcher.search(&game, &(), 0, &cfg, None, &mut rng(1))
+    };
+
+    let full = answer(false);
+    assert_eq!(
+        full.choice, 2,
+        "the fixture must be won by the late choice, or it tests nothing"
+    );
+
+    let stopped = answer(true);
+    assert_eq!(
+        stopped.choice, full.choice,
+        "early termination answered {} after {} of {BUDGET} iterations, stopping for \
+         {:?}, where the full budget answers {}",
+        stopped.choice, stopped.root_visits, stopped.stop_reason, full.choice
+    );
+    assert!(
+        stopped.root_visits > LateChoice::UNLOCK_AT,
+        "the search stopped before the late choice was ever offered"
+    );
+}
+
+/// A worker proves something about its own tree: that the argmax of *those*
+/// visits cannot be overtaken in the iterations *it* had left. The merged
+/// answer is an argmax over statistics pooled from every worker, which no
+/// worker's proof ever saw, and a worker that stopped short contributed fewer
+/// visits to the pool than it would have. So the merge reports the budget.
+#[cfg(feature = "parallel")]
+#[test]
+fn a_pooled_merge_does_not_inherit_a_workers_proof() {
+    use mcts::RootParallel;
+
+    const THREADS: usize = 4;
+    const BUDGET: u32 = 5_000;
+
+    let game = GameTree::wide(200);
+    let cfg = Config {
+        early_termination: true,
+        ..config(BUDGET)
+    };
+
+    // One worker is the whole tree the answer is read off, so its proof stands.
+    // It is also what makes the pooled assertion below mean anything: without
+    // it, a pool that reported `Budget` might simply never have proved.
+    let mut solo = RootParallel::new(1, &game, |worker| rng(worker as u64 + 1));
+    let solo_result = solo.search(&game, &(), 0, &cfg, None);
+    assert_eq!(solo_result.stop_reason, StopReason::Proven);
+
+    let mut pool = RootParallel::new(THREADS, &game, |worker| rng(worker as u64 + 1));
+    let pooled = pool.search(&game, &(), 0, &cfg, None);
+    assert_eq!(
+        pooled.stop_reason,
+        StopReason::Budget,
+        "a {THREADS}-worker merge reported {:?} after {} iterations",
+        pooled.stop_reason,
+        pooled.iterations_used
+    );
+    assert!(
+        pooled.iterations_used < BUDGET * THREADS as u32,
+        "no worker stopped early, so nothing was merged over a truncated tree"
+    );
+}
