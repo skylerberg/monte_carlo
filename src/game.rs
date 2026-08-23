@@ -581,12 +581,23 @@ pub trait Game: Sized {
     /// Prior for progressive bias, evaluated once when a child is first visited.
     /// Only called when `Config::progressive_bias_weight` is non-zero.
     ///
+    /// `self` is the successor state and `mover` is the player who chose the
+    /// move that reached it — **not** the player the search runs for. Return a
+    /// number on the same scale as [`Rewards::reward`]`(mover)`, because that
+    /// is what it is added to: the crate scores every child by the reward of
+    /// the player who moved into it (max^n backup), so a prior stated on any
+    /// other player's scale is negated at every opponent node and the search
+    /// spends its budget helping the opponent play badly. `mover` names no one
+    /// at a terminal successor and cannot be recovered from the state in a game
+    /// where one player moves twice, which is why it is passed rather than
+    /// inferred.
+    ///
     /// Never called at a simultaneous node. The prior is evaluated at the
     /// *successor* state, so it can only ever describe a joint child — and
     /// selection at a simultaneous node scores each player's own marginals, not
     /// the joint children. `Config::progressive_bias_weight` therefore has no
     /// effect there.
-    fn heuristic_bias(&self, _ctx: &Self::Context, _perspective: u8) -> f32 {
+    fn heuristic_bias(&self, _ctx: &Self::Context, _mover: u8) -> f32 {
         0.0
     }
 }
