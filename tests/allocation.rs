@@ -11,8 +11,10 @@
 //! It does not prove the search got no slower; it proves the search does not do
 //! more of the one thing the design forbids it to do per iteration.
 //!
-//! One `#[test]` on purpose: the counter is global, so a second test running
-//! concurrently on another thread would be counted into this one's region.
+//! One `#[test]` on purpose, and the counter only counts the thread inside the
+//! measured region: the count is process-wide, so a second test on another
+//! thread — or libtest's own bookkeeping on the main one — would otherwise be
+//! charged to the search.
 //!
 //! Every fixture below is allocation-free *itself* — its state is a couple of
 //! integers and its `determinize_into` copies them — so that every allocation
@@ -26,6 +28,7 @@
 mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{AlwaysWin, Rps, VariableRps};
@@ -35,6 +38,30 @@ use wyrand::WyRand;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    /// Whether this thread is inside the measured region.
+    ///
+    /// A process-wide count charges the search for allocations it did not make:
+    /// libtest runs the test body on a spawned thread while the main thread
+    /// allocates for its own bookkeeping, and those land between `before` and
+    /// `after`. That showed up as this test varying by a few allocations
+    /// between CI runs *in both directions* — 19 against 23 one run and 23
+    /// against 19 the next — which is noise, not a search that grew.
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Count an allocation if this thread is the one being measured.
+///
+/// `try_with` rather than `with`: the allocator is still called during
+/// thread-local teardown, when the key is gone, and `with` would panic there.
+/// The key is const-initialised so reading it cannot itself allocate.
+#[inline]
+fn note() {
+    if MEASURING.try_with(Cell::get).unwrap_or(false) {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 struct Counting;
 
 // Only the count is instrumented; every request is forwarded to the system
@@ -42,7 +69,7 @@ struct Counting;
 // does.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        note();
         unsafe { System.alloc(layout) }
     }
 
@@ -51,12 +78,12 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        note();
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        note();
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -164,7 +191,9 @@ fn allocations_for<G: Game<Context = ()>>(
     let cfg = config(iterations);
 
     let before = ALLOCATIONS.load(Ordering::Relaxed);
+    MEASURING.with(|m| m.set(true));
     searcher.search(game, &(), perspective, &cfg, None, &mut rng);
+    MEASURING.with(|m| m.set(false));
     let after = ALLOCATIONS.load(Ordering::Relaxed);
 
     let nodes = searcher
