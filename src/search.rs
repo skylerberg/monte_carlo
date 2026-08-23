@@ -673,7 +673,7 @@ impl<G: Game> Searcher<G> {
                     root_visits: 0,
                     best_visits: 0,
                     best_mean_reward: 0.0,
-                }
+                };
             }
             _ => {}
         }
@@ -923,7 +923,11 @@ impl<C: Eq + Hash> RootCheck<C> {
         if self.after == self.before {
             return;
         }
-        let RootCheck { before, after, index } = self;
+        let RootCheck {
+            before,
+            after,
+            index,
+        } = self;
         // A wide root that merely permuted its list would pay a scan per choice
         // here on every iteration, which is the quadratic shape the crate's own
         // `CHILD_INDEX_THRESHOLD` exists to avoid.
@@ -932,9 +936,11 @@ impl<C: Eq + Hash> RootCheck<C> {
             for (i, choice) in before.iter().enumerate() {
                 index.insert_unique(hash_of(choice), i as u32, |&j| hash_of(&before[j as usize]));
             }
-            after
-                .iter()
-                .all(|c| index.find(hash_of(c), |&j| before[j as usize] == *c).is_some())
+            after.iter().all(|c| {
+                index
+                    .find(hash_of(c), |&j| before[j as usize] == *c)
+                    .is_some()
+            })
         } else {
             after.iter().all(|c| before.contains(c))
         };
