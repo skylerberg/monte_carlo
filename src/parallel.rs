@@ -10,6 +10,31 @@ use crate::rank::{leader_of, Candidate};
 use crate::search::{Config, RootPolicy, SearchResult, Searcher, StopReason};
 use crate::util::uniform_01;
 
+/// The widest cache line this crate expects to run on: 128 bytes on Apple
+/// silicon, and the pair of lines x86 prefetches together.
+const CACHE_LINE: usize = 128;
+
+// `repr(align)` below takes a literal, not a constant, so the two are pinned
+// together here rather than by a comment asking for the same edit twice.
+const _: () = assert!(CACHE_LINE == 128);
+
+/// One worker's whole mutable state, aligned so that no two workers can land on
+/// one cache line.
+///
+/// The pool's premise is that workers share nothing: separate trees, separate
+/// determinizations, one merge after the last of them has finished. Packed in a
+/// `Vec` the tuple is 296 bytes, so three of four worker boundaries fell inside
+/// a line — one worker's inline root node and rng against the next worker's
+/// `Vec` headers, both written several times per iteration, which is false
+/// sharing on the one structure that was supposed to have none. `repr(align)`
+/// rounds the size up as well as the base, so the separation is a property of
+/// the type rather than of where the allocator happened to put it.
+#[repr(align(128))]
+struct Worker<G: Game, R> {
+    searcher: Searcher<G>,
+    rng: R,
+}
+
 /// Root parallelisation: independent trees, independent determinizations, one
 /// merge at the end.
 ///
@@ -17,7 +42,7 @@ use crate::util::uniform_01;
 /// Every `Send`/`Sync` bound lives on this type, not on [`Game`], so games that
 /// are not thread-safe and targets without threads are unaffected.
 pub struct RootParallel<G: Game, R> {
-    workers: Vec<(Searcher<G>, R)>,
+    workers: Vec<Worker<G, R>>,
 }
 
 impl<G, R> RootParallel<G, R>
@@ -35,7 +60,10 @@ where
         assert!(threads > 0, "mcts: RootParallel needs at least one thread");
         Self {
             workers: (0..threads)
-                .map(|i| (Searcher::new(template), make_rng(i)))
+                .map(|i| Worker {
+                    searcher: Searcher::new(template),
+                    rng: make_rng(i),
+                })
                 .collect(),
         }
     }
@@ -47,13 +75,13 @@ where
 
     /// The per-worker trees, for inspection.
     pub fn trees(&self) -> impl Iterator<Item = &Node<G::Choice>> {
-        self.workers.iter().filter_map(|(s, _)| s.tree())
+        self.workers.iter().filter_map(|w| w.searcher.tree())
     }
 
     /// Re-root every worker's tree at `choice`.
     pub fn reuse_subtree(&mut self, choice: &G::Choice) {
-        for (searcher, _) in &mut self.workers {
-            searcher.reuse_subtree(choice);
+        for worker in &mut self.workers {
+            worker.searcher.reuse_subtree(choice);
         }
     }
 
@@ -64,15 +92,15 @@ where
     /// materialized joint successors from its own determinizations, so a tuple
     /// present in one tree need not be present in any other.
     pub fn reuse_joint(&mut self, played: &[(u8, G::Choice)]) {
-        for (searcher, _) in &mut self.workers {
-            searcher.reuse_joint(played);
+        for worker in &mut self.workers {
+            worker.searcher.reuse_joint(played);
         }
     }
 
     /// Discard every worker's retained tree.
     pub fn clear_trees(&mut self) {
-        for (searcher, _) in &mut self.workers {
-            searcher.clear_tree();
+        for worker in &mut self.workers {
+            worker.searcher.clear_tree();
         }
     }
 
@@ -106,8 +134,8 @@ where
         // here means no worker's runs at all — which would leave every retained
         // tree armed for a position the pool never searched.
         if let Some(refusal) = cfg.refusal() {
-            for (searcher, _) in &mut self.workers {
-                searcher.disarm();
+            for worker in &mut self.workers {
+                worker.searcher.disarm();
             }
             panic!("{refusal}");
         }
@@ -116,7 +144,8 @@ where
             let handles: Vec<_> = self
                 .workers
                 .iter_mut()
-                .map(|(searcher, rng)| {
+                .map(|worker| {
+                    let Worker { searcher, rng } = worker;
                     scope.spawn(move || searcher.search(state, ctx, perspective, cfg, cancel, rng))
                 })
                 .collect();
@@ -158,8 +187,9 @@ where
             return results.into_iter().next().expect("at least one worker");
         }
 
-        let simultaneous = self.workers.iter().any(|(searcher, _)| {
-            searcher
+        let simultaneous = self.workers.iter().any(|worker| {
+            worker
+                .searcher
                 .tree()
                 .is_some_and(|root| root.simultaneous_players().is_some())
         });
@@ -200,7 +230,7 @@ where
         let first_tree = self
             .workers
             .first()
-            .and_then(|(searcher, _)| searcher.tree());
+            .and_then(|worker| worker.searcher.tree());
         if let Some(root) = first_tree {
             let playable: FxHashSet<&G::Choice> = legal.iter().collect();
             let mut seed = |choice: &G::Choice| {
@@ -229,8 +259,8 @@ where
         for choice in &legal {
             merged.slot(choice);
         }
-        for (searcher, _) in &self.workers {
-            let Some(root) = searcher.tree() else {
+        for worker in &self.workers {
+            let Some(root) = worker.searcher.tree() else {
                 continue;
             };
             match root.simul() {
@@ -305,7 +335,7 @@ where
         let best = if sample {
             // Worker 0's rng, borrowed only now that the thread scope has
             // closed, so the draw stays deterministic for a fixed thread count.
-            let rng = &mut self.workers[0].1;
+            let rng = &mut self.workers[0].rng;
             sample_merged(&merged.strategy, rng).unwrap_or_else(|| merged.leader())
         } else if mixes {
             merged.strategy_leader().unwrap_or_else(|| merged.leader())
@@ -506,6 +536,31 @@ mod tests {
     use crate::util::below;
     use rand_core::SeedableRng;
     use wyrand::WyRand;
+
+    /// Workers write their own tree and their own rng on every iteration of
+    /// every thread. Two of them on one cache line is false sharing in the one
+    /// place this design promised none, so the padding is asserted rather than
+    /// hoped for: `repr(align)` rounds the stride up as well as the base, which
+    /// is what makes the separation impossible to lose to an allocator.
+    #[test]
+    fn no_two_workers_share_a_cache_line() {
+        assert!(align_of::<Worker<Ladder, WyRand>>() >= CACHE_LINE);
+        assert_eq!(size_of::<Worker<Ladder, WyRand>>() % CACHE_LINE, 0);
+
+        let pool = seeded(4, &Ladder::default());
+        let stride = size_of::<Worker<Ladder, WyRand>>();
+        let base = pool.workers.as_ptr() as usize;
+        assert_eq!(base % CACHE_LINE, 0, "the pool itself is not line-aligned");
+        for i in 1..pool.workers.len() {
+            let previous_end = base + i * stride - 1;
+            assert_ne!(
+                previous_end / CACHE_LINE,
+                (base + i * stride) / CACHE_LINE,
+                "workers {} and {i} share a {CACHE_LINE}-byte line",
+                i - 1
+            );
+        }
+    }
 
     /// Rock-paper-scissors on `[0, 1]`, indexed `[player 0][player 1]`.
     const RPS: [[f64; 3]; 3] = [[0.5, 0.0, 1.0], [1.0, 0.5, 0.0], [0.0, 1.0, 0.5]];
@@ -821,12 +876,12 @@ mod tests {
     /// whose children the tree met in an order the position does not list them
     /// in — the same disagreement `PermutedTie` builds out of arms.
     #[derive(Clone, Default)]
-    struct PermutedLine {
+    struct PermutedLadder {
         resolved: bool,
         determinized: bool,
     }
 
-    impl Game for PermutedLine {
+    impl Game for PermutedLadder {
         type Choice = u8;
         type Rewards = [f64; 2];
         type Context = ();
@@ -1156,7 +1211,7 @@ mod tests {
     /// met them reversed, answered its last.
     #[test]
     fn a_sequential_merge_breaks_a_tie_where_a_single_threaded_search_does() {
-        let game = PermutedLine::default();
+        let game = PermutedLadder::default();
         let cfg = config(PERMUTED_TIE_ACTIONS);
 
         let mut solo = Searcher::new(&game);

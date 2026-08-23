@@ -209,6 +209,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report — roughly one arbitrary range in twenty, plain two-decimal ones
   included.
 
+### Performance
+
+Behaviour is unchanged by every item here: the sequential fingerprint is
+byte-identical and node counts are bit-identical in every configuration.
+
+* **A simultaneous node's arm index survives a newly discovered action**, which
+  turns expansion from `O(A^2)` into `O(A)` in the arm count. The index's
+  payloads were global positions into the flat arm array, so the insert that
+  `grow_slot` performs moved every later one and the whole index was discarded —
+  on a first visit, once per action, with a linear scan over the arms in
+  between, and again for every action a later determinization reveals. Payloads
+  are now `(slot, slot-relative position)`, which an insert cannot invalidate,
+  and `grow_slot` adds the one new arm — and builds the index in the first
+  place, when the arm it adds is the one that crosses
+  `Game::CHILD_INDEX_THRESHOLD`, since a node holds no arms before its first
+  expansion pass and so cannot already be over the threshold when that pass
+  begins. Measured on an Information Set MCTS shape (two players, 50 of a pool
+  of 2,000 actions legal per determinization, 2,000 iterations): **5,477,504
+  `Choice` comparisons before, 296,186 after**, and the cost is now flat in the
+  pool size rather than quadratic in it. On a node holding a fixed 512 actions
+  per player, whose whole arm set is therefore discovered on one visit: **2,597
+  comparisons over two visits, against 133,376** if the index is built only on
+  entry to an expansion pass rather than during the growth that creates the
+  arms. `tests/arm_index.rs` holds both there.
+* **Only `SimultaneousPolicy::Duct` pays for `ln(availability)` on arms.** It is
+  the sole reader of the cached logarithm, and the default policy is
+  `RegretMatching`, which was paying a libm call per arm per visit — one for
+  every action of every participant at every simultaneous node on the descent —
+  to maintain a number nothing read. Measured on two players x 20 actions x 3
+  plies, 5,000 iterations: **414,200 `ln` calls before, 0 after** under
+  `RegretMatching`, unchanged under `Duct`.
+* **A root's children no longer cache a denominator `select` does not read.**
+  `select` scores a root's children against the root's own visit count and reads
+  a child's `ln_availability` only at a non-root parent, so the root paid one
+  libm call per legal choice per iteration — on both the enumerating path and
+  the `ROOT_CHOICES_INVARIANT` fast path. The availability *count* is still
+  bumped, because the root ranking divides by it. Measured on a 30-choice root,
+  5,000 iterations: **149,970 `ln` calls before, 0 after**, on either path.
+* **Root-parallel workers are cache-line aligned.** `RootParallel` kept its
+  per-worker `Searcher` and rng in one packed `Vec`, at a 296-byte stride, so
+  three of four worker boundaries fell inside a 128-byte line: two threads
+  writing one line every iteration, in the one structure whose premise is that
+  workers share nothing. Each worker is now a `#[repr(align(128))]` struct, at a
+  cost of 88 bytes of padding per worker.
+
 ### Added
 
 * `Game::advance` and `Game::determinize_into` document the root contract: an

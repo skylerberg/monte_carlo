@@ -377,6 +377,17 @@ impl SimultaneousPolicy {
     pub const fn mixes(self) -> bool {
         matches!(self, Self::RegretMatching)
     }
+
+    /// Whether selection scores an arm against `ln(availability)`, and so
+    /// whether expansion has to keep that logarithm up to date.
+    ///
+    /// Only `Duct` reads it. Maintaining it is a libm call per arm per visit —
+    /// `sum(|A_i|)` of them per simultaneous node on the descent — on a loop
+    /// whose other work is a handful of integer instructions, so a policy that
+    /// never reads it does not pay for it.
+    pub(crate) const fn reads_ln_availability(self) -> bool {
+        matches!(self, Self::Duct)
+    }
 }
 
 /// The interface a game implements to be searched.
