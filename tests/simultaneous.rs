@@ -194,16 +194,91 @@ impl<G: Game> Game for Ducted<G> {
     }
 }
 
+/// A simultaneous game whose every payoff is exactly the top of the range it
+/// declares.
+///
+/// The declared bounds are the fixture; the game itself is the smallest
+/// simultaneous position that credits a joint action at all.
+/// Debug-only: the assertion it exists for compiles away in release, where the
+/// fixture would be dead code.
+#[cfg(debug_assertions)]
+#[derive(Clone, Default)]
+struct PaysTheCeiling {
+    resolved: bool,
+}
+
+#[cfg(debug_assertions)]
+impl PaysTheCeiling {
+    const FLOOR: f64 = -10.0;
+    const CEILING: f64 = -3.9;
+}
+
+#[cfg(debug_assertions)]
+impl Game for PaysTheCeiling {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> Status<[f64; 2]> {
+        match self.resolved {
+            true => Status::Terminal([Self::CEILING; 2]),
+            false => Status::Simultaneous {
+                players: PlayerSet::first_n(2),
+            },
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<u8>) {
+        out.extend([0, 1]);
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), _: &u8, _: &mut R) {
+        unreachable!("PaysTheCeiling has no sequential node")
+    }
+
+    fn apply_joint<R: Rng + ?Sized>(&mut self, _: &(), _: JointChoices<'_, u8>, _: &mut R) {
+        self.resolved = true;
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+        [Self::CEILING; 2]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}
+
 /// A simultaneous node at which player 1 has no legal action at all, so no
 /// joint action exists.
 ///
 /// Section 7.1 lists no fixture for this and section 7.2 requires one: a game
 /// can reach a degenerate position through its own rules, and the library's
-/// contract is that release builds score the iteration zero instead of reading
-/// past the end of an empty slot.
+/// contract is that release builds score the iteration at the declared minimum
+/// reward instead of reading past the end of an empty slot.
 #[derive(Clone, Default)]
 struct NoLegalReply {
     resolved: bool,
+}
+
+impl NoLegalReply {
+    /// The declared floor the degenerate node is scored at. Above zero, which
+    /// is what makes it distinguishable from the zero this used to fabricate.
+    const FLOOR: f64 = 0.25;
+}
+
+/// Both halves of the degenerate-node contract read the same position at the
+/// same declared range; only the build profile differs.
+fn no_legal_reply_config() -> Config {
+    Config {
+        min_reward: NoLegalReply::FLOOR,
+        ..config(1_000)
+    }
 }
 
 impl Game for NoLegalReply {
@@ -1015,13 +1090,21 @@ fn a_joint_child_reports_no_single_choice() {
 }
 
 /// A simultaneous node where one player has no legal action has no joint action
-/// either. Release builds score the iteration zero and carry on.
+/// either. Release builds score the iteration at the declared minimum reward
+/// and carry on.
+///
+/// The minimum and not a zero: the score is a payoff the crate fabricates
+/// rather than one the game produced, it is credited to every node on the path,
+/// and a value outside the declared range there is one no reader of those means
+/// — the caller, or the reward-range assertion at a simultaneous node — can
+/// tell from a payoff the game really made. Declared here as a range that does
+/// not contain zero, so the two rules give different answers.
 #[cfg(not(debug_assertions))]
 #[test]
-fn a_degenerate_simultaneous_node_scores_zero() {
+fn a_degenerate_simultaneous_node_scores_the_declared_minimum() {
     let game = NoLegalReply::default();
     let mut searcher = Searcher::new(&game);
-    let result = searcher.search(&game, &(), 0, &config(1_000), None, &mut rng(1));
+    let result = searcher.search(&game, &(), 0, &no_legal_reply_config(), None, &mut rng(1));
 
     assert!(
         result.choice == 0 || result.choice == 1,
@@ -1031,19 +1114,71 @@ fn a_degenerate_simultaneous_node_scores_zero() {
     assert_eq!(result.root_visits, 1_000, "every iteration still completed");
     assert_eq!(result.best_visits, 0, "no arm was ever selected");
     let root = searcher.tree().expect("the search retained its tree");
-    assert_eq!(root.mean_reward(), 0.0, "the degenerate node scores zero");
+    assert_eq!(
+        root.mean_reward(),
+        NoLegalReply::FLOOR,
+        "the degenerate node scores the declared minimum"
+    );
 }
 
 /// The same position in a debug build, where it is a bug worth naming rather
-/// than a zero worth returning: a node scored zero on every iteration drags its
-/// parent's mean down indistinguishably from a bad evaluation.
+/// than a floor worth returning: a node scored at the bottom of the range on
+/// every iteration drags its parent's mean down indistinguishably from a bad
+/// evaluation.
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "has no legal action at a simultaneous node")]
 fn a_degenerate_simultaneous_node_is_a_debug_assertion() {
     let game = NoLegalReply::default();
     let mut searcher = Searcher::new(&game);
-    searcher.search(&game, &(), 0, &config(1_000), None, &mut rng(1));
+    searcher.search(&game, &(), 0, &no_legal_reply_config(), None, &mut rng(1));
+}
+
+/// A payoff outside the declared reward range is a defect under `Duct` too, and
+/// debug builds say so there as well.
+///
+/// The assertion used to sit inside the regret-matching branch, on the reading
+/// that the range reaches the search through that policy's clamp and nowhere
+/// else. It does not: `Duct` measures its tie tolerance against the width of
+/// the range, so a range that does not describe the payoffs is the one input
+/// that turns decoupled UCB1 into a uniform random move picker — and it was the
+/// one policy nothing checked.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "outside the declared [0, 0.5] reward range")]
+fn a_duct_node_asserts_the_declared_reward_range() {
+    // `DominantPair` pays up to 0.8, so this range is the lie under test.
+    let cfg = Config {
+        max_reward: 0.5,
+        ..config(1_000)
+    };
+    let game = Ducted(DominantPair::default());
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &cfg, None, &mut rng(1));
+}
+
+/// A game paying exactly the maximum it declared is inside its range.
+///
+/// `[-10.0, -3.9]` is a range whose own width does not add back to its top:
+/// `span` is `6.1` and `-10.0 + 6.1` is `-3.9000000000000004`, strictly below
+/// the declared ceiling. An assertion that rebuilds the ceiling that way, and
+/// with no slack, accuses the game of the defect the assertion exists to
+/// report — the same false accusation the fabricated degenerate payoff used to
+/// make. Roughly one arbitrary `[min, max]` pair in twenty is such a range,
+/// two-decimal ones included.
+#[cfg(debug_assertions)]
+#[test]
+fn a_game_paying_its_declared_maximum_is_in_range() {
+    let cfg = Config {
+        min_reward: PaysTheCeiling::FLOOR,
+        max_reward: PaysTheCeiling::CEILING,
+        ..config(200)
+    };
+    // Both policies: the assertion covers both, and only one of them clamps.
+    let game = PaysTheCeiling::default();
+    Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
+    let game = Ducted(PaysTheCeiling::default());
+    Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
 }
 
 // ---------------------------------------------------------------------------

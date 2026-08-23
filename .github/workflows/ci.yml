@@ -34,6 +34,12 @@ jobs:
       - name: Test (no default features)
         run: cargo test --no-default-features
 
+      # Every `debug_assert!` compiles away here, so the release halves of the
+      # degenerate-node contracts — which assert on the value a debug build
+      # aborts before producing — run in this step and in no other.
+      - name: Test (release)
+        run: cargo test --release --all-features
+
       - name: Feature matrix
         run: |
           for f in "" time parallel serde time,parallel time,serde parallel,serde; do

@@ -51,6 +51,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   half of the rate that breaks the root ranking's ties, and it was not reachable
   from `Searcher::tree`, so a caller could neither reproduce the ranking nor tell
   whether their `determinize_into` varies the legal set at all.
+* **Breaking: `Rewards::zero()` is now `Rewards::uniform(f64)`.** The crate
+  fabricates a payoff for a node it cannot descend from — one nobody's game
+  produced — and credits it to every node on the path, so it has to be a value
+  the caller's declared range contains. A zero is not that value for a game
+  paying in `[1, 2]`: the fabricated reward dragged those nodes' means below the
+  range they are read against, and at a simultaneous ancestor it tripped the
+  reward-range assertion in a message blaming the game for a payoff the search
+  had invented. All three degenerate sites now score `Config::min_reward`, and
+  the sequential one gained a debug assertion of its own rather than being
+  reported, if at all, by that misdirected message. Every external
+  `impl Rewards` needs the one-line migration
+  `fn uniform(value: f64) -> Self { [value; N] }` — or whatever builds your
+  reward vector from one number; the blanket `[f64; N]` impl is already updated.
+  A game whose declared floor is zero sees no behaviour change; one declaring
+  `[-1, 1]` now scores a degenerate node at `-1` rather than `0`, which is the
+  point — a fabricated payoff has to sit inside the range the game declared,
+  and a zero was only ever right for a game whose floor happened to be zero.
+* **An empty or inverted reward range is refused.** `Searcher::search` and
+  `RootParallel::search` now panic on `min_reward >= max_reward`, which is a
+  config a caller who never set the range on a game paying a constant may be
+  holding today. It was never honoured: `normalize_reward` divides by the span,
+  so regret matching was fed a constant `0.5` for every payoff — a driftless
+  random walk over the regrets, measured at roughly *twice* the exploitability
+  of playing uniformly at random — and the reward-range assertion was
+  short-circuited in exactly that case, so nothing said so. `Duct` fares no
+  better: its tie tolerance is a fraction of the same span. The pool refuses on
+  its own thread rather than as N workers panicking at once, and disarms every
+  worker's retained tree before it does, so a refused search leaves the pool as
+  a completed one does.
 
 ### Fixed
 
@@ -117,6 +146,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reuse_joint` takes its documented miss path instead of aborting the process
   in debug and blaming the caller. `Searcher::root_policy_into` returns false
   for such a root rather than reporting an empty, non-normalized policy.
+* **`RootPolicy::MostVisited` answers with an arm where the root policy puts
+  mass on none of them.** Regret matching's `sigma` is exactly zero for an arm
+  dominated wherever it is legal, so its `strategy_sum` never leaves zero while
+  the exploration floor goes on handing it visits — a legal set carrying no
+  strategy mass is a state the search reaches and stays in, not a startup
+  transient. `duct::best_arm` returned `None` there and the caller fell through
+  to its own uniform draw over the position's choice list, which reported
+  `best_visits = 0` and `best_mean_reward = 0.0` for a move the tree held real
+  statistics for, and consumed an rng draw inside a root policy documented
+  deterministic. It now falls back to the crate's root ranking over the legal
+  arms, as `root_strategy_into` and `sample_root_arm` already fell back to
+  uniform-over-legal, so the reported statistics belong to the action returned.
+* **A `RootParallel` merge breaks a tie the way the search it pools does.** Both
+  sides rank by the same rule and both keep the incumbent on a tie, so a tied
+  root is settled by the order the candidates are scanned in — and the merge
+  scanned the position's own choice list while a `Searcher` scans the tree,
+  which under determinization is a different order. `RootParallel::new(1, ..)`
+  therefore disagreed with a directly-seeded `Searcher` on an identical tree, at
+  any budget: exact ties survive one. The merge is now seeded in the first
+  worker's discovery order, then in the position's for anything that worker
+  never met. Both root kinds moved — a `Duct` simultaneous root and a sequential
+  one — so a pooled search over a tied root can return a different (equally
+  ranked) action than it did before.
+* **The reward-range assertion covers both simultaneous policies, and no longer
+  accuses a game paying its own declared maximum.** It sat inside the
+  `RegretMatching` backup on the reading that the range reaches the search
+  through that policy's clamp and nowhere else. It does not: `Duct` measures its
+  tie tolerance against the width of the range, which is the one input that
+  turns decoupled UCB1 into a uniform random move picker, and it was the policy
+  nothing checked. The bound is now `Config::max_reward` itself with the `1e-9`
+  slack `DESIGN.md` §6 specifies, not a `min_reward + span` reconstruction of
+  it: for `[-10.0, -3.9]` that sum is `-3.9000000000000004`, so a game paying
+  exactly its declared maximum was accused of the defect the assertion exists to
+  report — roughly one arbitrary range in twenty, plain two-decimal ones
+  included.
 
 ### Added
 
@@ -125,6 +189,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the one being searched, and a determinization may change what is legal but not
   who acts. Debug builds enforce both on every determinization. Release
   behaviour is unchanged.
+
+### Known limitations
+
+* **An over-declared reward range still degrades `Duct` selection, and nothing
+  detects it.** `Duct` admits arms within 1% of the range's *width* of the
+  leading arm into a uniform tie draw, so a range declared much wider than the
+  payoffs really are widens that pool until every visited arm is in it:
+  measured on a two-arm game with a strictly dominant row and payoffs in
+  `[0, 1]`, 0.999 of the arm visits land on the dominant row at
+  `max_reward = 1`, 0.998 at `10`, and at `200` the search answers the *wrong*
+  arm with a 0.506 share — chance. This release documents it on
+  `Config::max_reward` and asserts, under both policies, that observed payoffs
+  fall inside the declared range — which catches a range that is too *narrow*
+  and cannot catch one that is too wide, because an over-declared range is one
+  every payoff satisfies. Deriving the tolerance from the spread of the values
+  observed at the node is not the fix: it lets one arm with a terrible estimate
+  widen the band the good arms are compared inside. Declare the range your game
+  actually pays in.
 
 ## [0.3.0]
 

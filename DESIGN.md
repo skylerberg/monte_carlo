@@ -1175,8 +1175,10 @@ Three consequences, each of which is why this is cheap enough to do inline:
   first visit so the common case never reallocates either.
 3. If `slot_len(s) == 0` after enumeration, or no arm of slot `s` is stamped
    (`avail_epoch == t`), the joint action does not exist: set
-   `rewards = G::Rewards::zero()` and break out of the descent, exactly as the
-   existing degenerate empty-choice node does. Emit the debug assertion of §6.
+   `rewards = G::Rewards::uniform(cfg.min_reward)` and break out of the descent, exactly
+   as the existing degenerate empty-choice node does. The declared floor rather than a
+   zero, because this payoff is credited to every node on the path and is asserted
+   against the declared range at every simultaneous one. Emit the debug assertion of §6.
 
 **`ROOT_CHOICES_INVARIANT` fast path at a simultaneous root.** When
 `G::ROOT_CHOICES_INVARIANT && node.is_root() && root_fully_expanded`, skip steps 1–2
@@ -1773,7 +1775,15 @@ assert!(
 This one is a hard `assert!`, not a debug assertion: exceeding it silently aliases
 joint successors, which is a wrong move in release.
 
-**Reward range** — in the `RegretMatching` backup, once per credited arm:
+**Reward range** — once per credited arm at a simultaneous node, under *both*
+policies. It sat inside the `RegretMatching` backup on the reading that the range
+reaches the search through that policy's clamp and nowhere else; it does not,
+because `Duct` measures its tie tolerance against the width of the range, so an
+over-declared range is the one input that turns decoupled UCB1 into a uniform
+random move picker and it was the policy nothing checked. Against
+`cfg.max_reward` itself rather than a `cfg.min_reward + span` reconstruction of
+it, which is not the same number in f64 — for `[-10.0, -3.9]` the sum is
+`-3.9000000000000004` — and would accuse a game paying its own declared maximum:
 
 ```
 debug_assert!(
@@ -1786,14 +1796,50 @@ debug_assert!(
 );
 ```
 
+**Config refusal** — `Config::validate`, in the preamble of `Searcher::search` and
+on `RootParallel::search`'s own thread before any worker is spawned:
+
+```
+assert!(
+    cfg.iterations != 0 || cfg.time_limit_ms.is_some(),
+    "mcts: Config has neither an iteration nor a time budget"
+);
+assert!(
+    cfg.max_reward > cfg.min_reward,
+    "mcts: Config declares the reward range [{}, {}], which is empty. Set both bounds \
+     to your game's actual payoff range: regret matching cannot tell one payoff from \
+     another inside an empty range, and decoupled UCB1 measures its tie tolerance \
+     against the width of it.",
+    cfg.min_reward, cfg.max_reward
+);
+```
+
+Hard `assert!`s, not debug assertions: an empty or inverted range is a
+configuration no search can honour under either policy, and it is silent in
+release. Both callers raise the same refusal — one `Config::refusal()` returning
+the message, so the pool can act before it panics. `normalize_reward` divides by the span, so regret matching is handed a
+constant `0.5` for every payoff — a driftless, high-variance random walk over the
+regrets, measured at roughly twice the exploitability of playing uniformly at
+random — and `Duct`'s tie tolerance is a fraction of the same span, so a zero one
+leaves the tie pool decided by nothing. Both bounds are checked, because an
+inverted range takes the same branch as an empty one.
+
+`RootParallel::search` raises it on its own thread rather than as N workers
+panicking at once, and **disarms every worker's retained tree first**.
+`Searcher::search` consumes `tree_is_current` as its first statement, so every
+exit from it — the forced-move return, a preamble panic — leaves the tree stale;
+a config refused before the workers are spawned means no worker's `search` runs
+to do that, and the refusal has to stand in for it or the next search reuses
+trees built for the previous position.
+
 **Degenerate simultaneous node**:
 
 ```
 debug_assert!(
     false,
     "mcts: player {p} has no legal action at a simultaneous node, so no joint action \
-     exists. The iteration scores zero, which will drag this node's parent's mean \
-     down indistinguishably from a bad evaluation."
+     exists. The iteration scores the declared minimum reward, which will drag this \
+     node's parent's mean down indistinguishably from a bad evaluation."
 );
 ```
 

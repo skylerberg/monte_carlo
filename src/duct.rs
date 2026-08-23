@@ -35,7 +35,24 @@ use crate::util::{below, uniform_01};
 /// test would see a tie about never and quietly fall back to first-maximum —
 /// which is index order, the exact rule randomized tie-breaking exists to
 /// avoid.
+///
+/// The span is [`crate::Config::max_reward`] minus
+/// [`crate::Config::min_reward`], so this is the one place the declared range
+/// reaches a `Duct` search — there is no clamp on that path — and a range
+/// declared wider than the payoffs really are widens the pool in proportion.
+/// The reference cannot instead be the spread of the values actually observed
+/// at the node: that makes one arm with a terrible estimate widen the band the
+/// good arms are compared inside, which is backwards. It is the caller's
+/// declared scale or nothing, and [`crate::Config::max_reward`] says so.
 const TIE_TOLERANCE: f64 = 0.01;
+
+/// Slack on the reward-range assertion, as specified in DESIGN.md §6.
+///
+/// The assertion is there to catch a range that does not describe the payoffs,
+/// not to referee the last bit of a float: a game whose own arithmetic reaches
+/// a declared bound by a different route than the caller's literal did lands a
+/// few ulps outside it and has done nothing wrong.
+const RANGE_EPSILON: f64 = 1e-9;
 
 /// The largest exploration floor regret matching will mix in.
 ///
@@ -55,12 +72,14 @@ const MIN_FLOOR: f64 = 0.005;
 
 /// A raw payoff on the `[0, 1]` scale a regret lives on.
 ///
-/// `span` is `Config::max_reward - Config::min_reward`. A game that declares an
-/// empty range gets `0.5` for every player rather than a `0 / 0`: a NaN regret
-/// would make its arm's `sigma` NaN, `f64::max` would quietly report the arm's
-/// positive part as `0.0` rather than propagating, and the arm would be
-/// unselectable for the rest of the search with no symptom other than a worse
-/// move.
+/// `span` is `Config::max_reward - Config::min_reward`, which
+/// `Config::validate` has already refused to let a search run with at
+/// zero or below. The `0.5` this returns for an empty one is therefore a
+/// release-build backstop rather than a supported configuration, and it is
+/// `0.5` rather than a `0 / 0`: a NaN regret would make its arm's `sigma` NaN,
+/// `f64::max` would quietly report the arm's positive part as `0.0` rather than
+/// propagating, and the arm would be unselectable for the rest of the search
+/// with no symptom other than a worse move.
 ///
 /// The clamp is the part with teeth. Regret matching's `sigma` is invariant
 /// under any positive rescaling of every regret, so `span` does not change the
@@ -382,8 +401,9 @@ pub(crate) fn credit_marginals<C, W: Rewards>(
     rewards: &W,
     policy: SimultaneousPolicy,
     min_reward: f64,
-    span: f64,
+    max_reward: f64,
 ) {
+    let span = max_reward - min_reward;
     let arity = simul.arity as usize;
     let key_bits = simul.key_bits;
     debug_assert_eq!(
@@ -402,16 +422,31 @@ pub(crate) fn credit_marginals<C, W: Rewards>(
         let at = simul.starts[slot] as usize + key.arm(slot, key_bits) as usize;
         let reward = rewards.reward(player);
 
+        // Both policies, and no exemption for an empty span. The range is what
+        // regret matching clamps to and what scales `Duct`'s tie tolerance, so
+        // a payoff outside it is a live defect under either — and the empty
+        // range this used to wave through is the configuration that makes
+        // regret matching worse than random, which `Config::validate` now
+        // refuses outright.
+        //
+        // Against `max_reward` itself, with slack, rather than against a
+        // `min_reward + span` reconstruction of it: that sum is
+        // `-3.9000000000000004` for a declared `[-10, -3.9]`, so a game paying
+        // exactly its own declared maximum would be accused of the defect this
+        // assertion exists to report.
+        debug_assert!(
+            reward >= min_reward - RANGE_EPSILON && reward <= max_reward + RANGE_EPSILON,
+            "mcts: player {player} was paid {reward} at a simultaneous node, outside \
+             the declared [{min_reward}, {max_reward}] reward range. Regret matching \
+             clamps payoffs into [0, 1] before touching a regret, so an out-of-range \
+             reward is indistinguishable from one at the boundary — a game paying in \
+             [-1, 1] against the default [0, 1] range cannot tell a loss from a draw \
+             — and Duct measures its tie tolerance against the width of the range, so \
+             one declared wider than the payoffs draws uniformly between arms it \
+             should be ranking."
+        );
+
         if let SimultaneousPolicy::RegretMatching = policy {
-            debug_assert!(
-                span <= 0.0 || (reward >= min_reward && reward <= min_reward + span),
-                "mcts: player {player} was paid {reward} at a simultaneous node, outside \
-                 the declared [{min_reward}, {}] reward range. Regret matching clamps \
-                 payoffs into [0, 1] before touching a regret, so an out-of-range reward \
-                 is indistinguishable from one at the boundary — a game paying in \
-                 [-1, 1] against the default [0, 1] range cannot tell a loss from a draw.",
-                min_reward + span
-            );
             let u_hat = normalize_reward(reward, min_reward, span);
             let mu = prob as f64;
             debug_assert!(
@@ -619,6 +654,21 @@ pub(crate) fn sample_root_arm<C, R: Rng + ?Sized>(
 /// joint child per opponent action, so the best *pair* is not the best action —
 /// the optimistic bug that makes a decoupled agent assume its opponent plays
 /// along.
+///
+/// Where no legal arm carries any weight the answer is [`leading_arm`], for the
+/// same reason [`root_strategy_into`] and [`sample_root_arm`] fall back to
+/// uniform over the legal arms there: the caller asked which action to play and
+/// a distribution with no mass on it is not an answer. Zero mass is a state the
+/// search reaches and stays in rather than a startup transient — an arm
+/// dominated wherever it is legal has `sigma = 0` on every iteration, so its
+/// `strategy_sum` never leaves zero while the exploration floor keeps handing it
+/// visits — and falling through to the caller's own uniform draw there returned
+/// a move whose reported visits and mean reward were the hardcoded zeroes of
+/// that fallback rather than the statistics the tree holds for it. The
+/// fallback is a ranking rather than a draw because
+/// [`crate::RootPolicy::MostVisited`] is documented deterministic; the uniform
+/// distribution its siblings report leaves every legal arm tied, and this
+/// breaks that tie by the crate's root ranking instead of by index order.
 pub(crate) fn best_arm<C>(
     simul: &Simul<C>,
     slot: usize,
@@ -639,7 +689,10 @@ pub(crate) fn best_arm<C>(
             best = Some(arm);
         }
     }
-    best
+    // Under `Duct` the weight is already one-hot at `leading_arm`, so this only
+    // ever answers where nothing legal was selected at all — and then it is
+    // `None` either way.
+    best.or_else(|| leading_arm(simul, slot, legal))
 }
 
 /// The highest-ranked legal arm of `slot`, first maximum, as a **slot-relative**
@@ -1055,6 +1108,105 @@ mod tests {
         assert_eq!(best_arm(simul, 0, &[true, false, false], RM), Some(0));
         assert_eq!(best_arm(simul, 0, &[true, false, false], DUCT), Some(0));
         assert_eq!(best_arm(simul, 0, &[false, false, false], RM), None);
+    }
+
+    /// `RootPolicy::MostVisited` has to answer with an arm even where the
+    /// policy puts no weight on any of them.
+    ///
+    /// Regret matching's `sigma` is exactly zero for an arm dominated wherever
+    /// it is legal, so its `strategy_sum` never leaves zero while the
+    /// exploration floor keeps handing it visits: a legal set carrying no
+    /// strategy mass at all is a state the search reaches and stays in, not a
+    /// startup transient. Answering `None` there sent the caller to its own
+    /// uniform draw over the position's choice list, which reports a hardcoded
+    /// zero visit count and zero mean for a marginal the tree holds real
+    /// statistics for.
+    #[test]
+    fn the_deterministic_root_move_answers_a_zero_mass_legal_set() {
+        let mut node = simul_node(PlayerSet::first_n(1));
+        node.expand_marginals(0, &[0u8, 1, 2], true, usize::MAX);
+        let simul = node.simul_mut().expect("simultaneous");
+        for (arm, (visits, reward)) in [(100u32, 40.0), (100, 70.0), (1, 1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            simul.arm_stats[arm].visits = visits;
+            simul.arm_stats[arm].availability = visits;
+            simul.arm_stats[arm].cumulative_reward = reward;
+            assert_eq!(simul.arm_policy[arm].strategy_sum, 0.0);
+        }
+
+        let all = [true; 3];
+        let mut strategy = Vec::new();
+        root_strategy_into(simul, 0, &all, RM, &mut strategy);
+        assert_eq!(
+            strategy,
+            vec![1.0 / 3.0; 3],
+            "the strategy this answer has to be an argmax of is the uniform fallback"
+        );
+        // Every legal arm is tied under that fallback, and the tie is broken by
+        // the crate's root ranking rather than by index order: arm 1 measured
+        // 0.7 against arm 0's 0.4, and arm 2's perfect mean is one selection of
+        // evidence.
+        assert_eq!(best_arm(simul, 0, &all, RM), Some(1));
+        assert_eq!(best_arm(simul, 0, &[true, false, false], RM), Some(0));
+        // An arm nothing was ever selected at is still nothing to report.
+        assert_eq!(best_arm(simul, 0, &[false; 3], RM), None);
+    }
+
+    /// Rescaling a game's payoffs, the declared reward range and the
+    /// exploration constant together leaves `Duct` selection identical — arm
+    /// for arm, draw for draw, and including which arms land in the tie pool.
+    ///
+    /// That is the sense in which the range is a *scale*. It is also why
+    /// declaring one wider than the payoffs really are is not free under
+    /// `Duct`: the tie tolerance is a fraction of the declared span and nothing
+    /// else moves with it, so over-declaring widens the pool until arms the
+    /// search can tell apart are drawn between uniformly.
+    #[test]
+    fn duct_selection_is_invariant_under_rescaling_the_reward_scale() {
+        // A power of two, so every scaled product below is exact and the two
+        // runs are comparable draw for draw rather than to within a tolerance.
+        const SCALE: f64 = 4.0;
+        const DRAWS: usize = 2_000;
+
+        let draws = |scale: f64| -> Vec<u32> {
+            let mut node = simul_node(PlayerSet::first_n(1));
+            node.expand_marginals(0, &[0u8, 1, 2, 3], false, usize::MAX);
+            let simul = node.simul_mut().expect("simultaneous");
+            // Arms 0 and 1 are exactly tied and lead; arm 3 sits 0.03 of the
+            // span below them, which is outside the tolerance and inside three
+            // times it.
+            for (arm, (visits, reward)) in [(20u32, 9.0), (20, 9.0), (12, 3.0), (40, 21.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let stats = &mut simul.arm_stats[arm];
+                stats.visits = visits;
+                stats.availability = 100;
+                stats.ln_availability = 100f64.ln();
+                stats.cumulative_reward = reward * scale;
+            }
+            let mut rng = WyRand::seed_from_u64(0x5CA1);
+            (0..DRAWS)
+                .map(|_| {
+                    select_marginal(simul, 0, 0, DUCT, ucb() * scale, scale, &mut rng)
+                        .expect("every arm is legal")
+                        .0
+                })
+                .collect()
+        };
+
+        let plain = draws(1.0);
+        assert!(
+            plain.contains(&0) && plain.contains(&1),
+            "the tie pool is what this test is about, and it did not form"
+        );
+        assert!(
+            !plain.contains(&2) && !plain.contains(&3),
+            "an arm more than a tolerance below the leaders was drawn"
+        );
+        assert_eq!(plain, draws(SCALE));
     }
 
     /// The rule this crate deliberately does not use, kept so that the test
