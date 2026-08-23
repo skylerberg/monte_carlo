@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+* **A forced move no longer leaves last turn's tree armed.** `Searcher::search`
+  now consumes `tree_is_current` with `mem::take` as its first statement,
+  instead of clearing it on its last line. A `StopReason::SingleChoice` return,
+  a panic out of the preamble, or a panic thrown by the game can no longer leave
+  a retained tree armed for a search that never asked to reuse one — which could
+  return a move that is illegal in the current position, sometimes stamped
+  `StopReason::Proven`. The same change closes two related variants: a
+  non-reused search always rebuilds the root, resetting
+  `scratch.root_fully_expanded`, and each `RootParallel` worker disarms itself,
+  so an aborted worker cannot pool a stale position into the merge.
+* **A zero-iteration or forced-move search at a simultaneous root now leaves a
+  simultaneous root.** The marginal block is installed in the search preamble,
+  so `Node::simultaneous_players()` is truthful even when no iteration ran, and
+  `reuse_joint` takes its documented miss path instead of aborting the process
+  in debug and blaming the caller. `Searcher::root_policy_into` returns false
+  for such a root rather than reporting an empty, non-normalized policy.
+
+### Added
+
+* `Game::advance` and `Game::determinize_into` document the root contract: an
+  `advance` at the root may resolve decisions the tree does not model, but not
+  the one being searched, and a determinization may change what is legal but not
+  who acts. Debug builds enforce both on every determinization. Release
+  behaviour is unchanged.
+
 ## [0.3.0]
 
 Simultaneous moves: a state can now report `Status::Simultaneous { players }`,

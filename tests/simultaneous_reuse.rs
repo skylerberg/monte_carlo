@@ -14,7 +14,10 @@ mod common;
 
 use common::{ManyArm, Rps, MANY_ARM_ACTIONS, PENNIES_PAYOFFS};
 use mcts::rand_core::{Rng, SeedableRng};
-use mcts::{Config, Edge, Game, JointChoices, Node, NodeKind, PlayerSet, Searcher, Status};
+use mcts::{
+    Config, Edge, Game, JointChoices, Node, NodeKind, PlayerSet, Searcher, Status, StopReason,
+};
+use std::sync::atomic::AtomicBool;
 use wyrand::WyRand;
 
 fn rng(seed: u64) -> WyRand {
@@ -376,6 +379,183 @@ fn reuse_joint_misses_are_survivable() {
         next.choice < MANY_ARM_ACTIONS,
         "chose {}, which is not a legal action",
         next.choice
+    );
+}
+
+/// The root is created before the loop, so a search that completes no
+/// iterations still leaves one. It has to describe the position anyway: a
+/// caller following the documented recipe reads `simultaneous_players` off it,
+/// and `reuse_joint`'s own debug assertion reads the marginal block. A root
+/// without one turned the documented next step of a simultaneous turn into a
+/// caller error in debug and a lie about who acts in release.
+#[test]
+fn a_zero_iteration_simultaneous_search_still_leaves_a_simultaneous_root() {
+    let game = Rps::default();
+    let mut searcher = Searcher::new(&game);
+    // Pre-set rather than a zero deadline, so the count is not a race.
+    let cancel = AtomicBool::new(true);
+
+    let result = searcher.search(&game, &(), 0, &config(400), Some(&cancel), &mut rng(23));
+    assert_eq!(result.stop_reason, StopReason::Cancelled);
+    assert_eq!(result.iterations_used, 0);
+
+    let root = searcher.tree().expect("a search leaves a tree");
+    assert_eq!(
+        root.simultaneous_players(),
+        Some(PlayerSet::first_n(2)),
+        "the root of a simultaneous position must name its participants"
+    );
+
+    assert!(
+        !searcher.reuse_joint(&[(0, result.choice), (1, 0)]),
+        "an empty tree holds no joint successor, so this is a miss"
+    );
+    assert!(
+        searcher.tree().is_none(),
+        "a miss left the previous round's tree in place"
+    );
+}
+
+/// Naming the participants is all a zero-iteration root can honestly do. The
+/// block installed there holds no arms, and `root_policy_into` promises
+/// probabilities summing to 1 whenever it returns `true`, so this root is one
+/// of its `false` cases and not an empty `true` a caller has to guess at.
+#[test]
+fn a_zero_iteration_simultaneous_root_reports_no_policy() {
+    let game = Rps::default();
+    let mut searcher = Searcher::new(&game);
+    let cancel = AtomicBool::new(true);
+
+    let result = searcher.search(&game, &(), 0, &config(400), Some(&cancel), &mut rng(23));
+    assert_eq!(result.iterations_used, 0);
+
+    let mut policy = Vec::new();
+    assert!(
+        !searcher.root_policy_into(&game, &(), 0, &mut policy),
+        "a root with no arms reported the policy {policy:?}"
+    );
+    assert!(policy.is_empty(), "a false return must leave `out` cleared");
+}
+
+/// The perspective player's only action in [`Forced`]'s second round.
+const ONLY_ACTION: u8 = 7;
+
+/// Two simultaneous rounds where the second leaves player 0 exactly one action,
+/// so a search there returns through the forced-move path.
+///
+/// Local rather than shared: nothing in `tests/common` reaches a forced move at
+/// a simultaneous root, which is the one zero-iteration exit that returns
+/// before the search has built anything at all.
+#[derive(Clone, Default)]
+struct Forced {
+    round: u8,
+}
+
+impl Game for Forced {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> Status<[f64; 2]> {
+        if self.round >= 2 {
+            Status::Terminal([0.5, 0.5])
+        } else {
+            Status::Simultaneous {
+                players: PlayerSet::first_n(2),
+            }
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<u8>) {
+        out.extend([0, 1, 2]);
+    }
+
+    fn choices_for_into(&self, ctx: &(), player: u8, out: &mut Vec<u8>) {
+        if self.round == 1 && player == 0 {
+            out.push(ONLY_ACTION);
+        } else {
+            self.choices_into(ctx, out);
+        }
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), _: &u8, _: &mut R) {
+        unreachable!("Forced has no sequential node")
+    }
+
+    fn apply_joint<R: Rng + ?Sized>(&mut self, _: &(), _: JointChoices<'_, u8>, _: &mut R) {
+        self.round += 1;
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+        self.round = 2;
+        [0.5, 0.5]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}
+
+/// A forced move is the other zero-iteration exit, and it returns before the
+/// search has touched the root at all. The root it returns with is a reused
+/// one — a joint successor promoted by `reuse_joint`, which owns marginals only
+/// if the search ever descended into it — so a promotion that never got past
+/// its first visit used to leave `simultaneous_players` answering `None` for a
+/// genuinely simultaneous position. The caller's documented next step,
+/// `reuse_joint`, then aborted the process in debug and dropped the tree
+/// silently in release.
+#[test]
+fn a_forced_move_at_a_simultaneous_root_still_leaves_a_simultaneous_root() {
+    let game = Forced::default();
+    let mut searcher = Searcher::new(&game);
+
+    // One iteration materializes exactly one joint successor and rolls it out
+    // without descending into it, which is what leaves it without marginals.
+    let first = searcher.search(&game, &(), 0, &config(1), None, &mut rng(1));
+    assert_eq!(first.iterations_used, 1);
+
+    let root = searcher.tree().expect("a search leaves a tree");
+    let (child, played) = materialized_tuples(root)
+        .into_iter()
+        .next()
+        .expect("one iteration materializes one joint successor");
+    assert!(
+        root.children()[child].simultaneous_players().is_none(),
+        "the promoted node was descended into, so it brings marginals of its own \
+         and this run does not exercise the case"
+    );
+    assert!(searcher.reuse_joint(&played));
+
+    let second_round = Forced { round: 1 };
+    let forced = searcher.search(&second_round, &(), 0, &config(100), None, &mut rng(2));
+    assert_eq!(forced.stop_reason, StopReason::SingleChoice);
+    assert_eq!(forced.choice, ONLY_ACTION);
+
+    let root = searcher.tree().expect("a forced move keeps the reused tree");
+    assert_eq!(
+        root.simultaneous_players(),
+        Some(PlayerSet::first_n(2)),
+        "the root of a simultaneous position must name its participants"
+    );
+
+    let mut policy = Vec::new();
+    assert!(
+        !searcher.root_policy_into(&second_round, &(), 0, &mut policy),
+        "a root the search never touched reported the policy {policy:?}"
+    );
+
+    assert!(
+        !searcher.reuse_joint(&[(0, ONLY_ACTION), (1, 0)]),
+        "a root the search never touched holds no joint successor, so this is a miss"
+    );
+    assert!(
+        searcher.tree().is_none(),
+        "a miss left the previous round's tree in place"
     );
 }
 

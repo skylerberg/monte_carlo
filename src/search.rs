@@ -1,4 +1,9 @@
+#[cfg(debug_assertions)]
+use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(debug_assertions)]
+use hashbrown::HashTable;
 
 use rand_core::Rng;
 
@@ -9,6 +14,8 @@ use crate::game::{Game, JointChoices, PlayerSet, Rewards, SimultaneousPolicy, St
 use crate::node::{JointKey, Node};
 use crate::select::select;
 use crate::util::below;
+#[cfg(debug_assertions)]
+use crate::util::hash_of;
 
 /// How often the wall clock is consulted, in iterations.
 const DEADLINE_CHECK_MASK: u32 = 31;
@@ -319,10 +326,10 @@ pub struct Searcher<G: Game> {
     root: Option<Node<G::Choice>>,
     /// Whether the retained tree describes the position about to be searched.
     ///
-    /// A search clears this; only `reuse_subtree` and `reuse_joint` set it. So
-    /// carrying a tree forward is something you ask for, and forgetting to
-    /// leaves you with a correct search rather than one rooted at last turn's
-    /// position.
+    /// A search consumes this on entry; only `reuse_subtree` and `reuse_joint`
+    /// set it. So carrying a tree forward is something you ask for, and
+    /// forgetting to leaves you with a correct search rather than one rooted at
+    /// last turn's position.
     tree_is_current: bool,
 }
 
@@ -505,8 +512,11 @@ impl<G: Game> Searcher<G> {
     /// `state`.
     ///
     /// Returns false if there is no retained tree, if the root is not
-    /// simultaneous, or if `player` does not act there. `out` is cleared first
-    /// and is a caller buffer, so repeated calls do not grow it.
+    /// simultaneous, if `player` does not act there, or if nothing has yet
+    /// enumerated `player`'s actions at that root — a search that completed no
+    /// iterations, or a forced move, leaves a root that names its participants
+    /// and holds no arms. `out` is cleared first and is a caller buffer, so
+    /// repeated calls do not grow it.
     ///
     /// Poll this once a turn, not once an iteration: renormalizing needs this
     /// position's own legal set, and `&self` means enumerating it into a
@@ -530,6 +540,14 @@ impl<G: Game> Searcher<G> {
         let Some(slot) = simul.players.slot_of(player) else {
             return false;
         };
+        // A root can name its participants and hold no arms for them: every
+        // zero-iteration exit installs the block so `simultaneous_players` is
+        // truthful, and only an iteration expands it. There is no strategy to
+        // report from one, and reporting `true` with an empty `out` would break
+        // the sum-to-1 promise above.
+        if simul.slot_len(slot) == 0 {
+            return false;
+        }
 
         let mut choices = Vec::new();
         state.choices_for_into(ctx, player, &mut choices);
@@ -557,6 +575,15 @@ impl<G: Game> Searcher<G> {
     /// Panics if `state` is terminal, has no legal choices, or if the config
     /// specifies neither an iteration nor a time budget.
     ///
+    /// [`Game::advance`] is called on each determinization of `state` and must
+    /// not fast-forward past the decision being searched — the answer list and
+    /// the root player are read from `state` itself, and the tree is built on
+    /// the advanced state. Debug builds assert both on every iteration, which
+    /// leaves one gap: a root offering a single choice returns it before the
+    /// first determinization, so a game that breaks the contract is not caught
+    /// there. The answer is still that root's own, having been read from
+    /// `state` before any `advance` ran.
+    ///
     /// At a simultaneous root, `result.choice` is the perspective player's own
     /// action, drawn from their mixed strategy under [`RootPolicy::Sampled`],
     /// and this call panics if `perspective` is not one of the acting players.
@@ -574,6 +601,11 @@ impl<G: Game> Searcher<G> {
         cancel: Option<&AtomicBool>,
         rng: &mut R,
     ) -> SearchResult<G::Choice> {
+        // Consumed here rather than cleared at the end, so an exit that never
+        // reaches the end — the forced-move return, a preamble panic, a panic
+        // out of the game — cannot leave the previous position's tree armed.
+        let reuse = core::mem::take(&mut self.tree_is_current);
+
         assert!(
             cfg.iterations != 0 || cfg.time_limit_ms.is_some(),
             "mcts: Config has neither an iteration nor a time budget"
@@ -602,6 +634,14 @@ impl<G: Game> Searcher<G> {
             Status::Terminal(_) => panic!("mcts: search called on a terminal state"),
         };
 
+        // Anything retained from an earlier search describes an earlier
+        // position unless `reuse_subtree` re-rooted it since. Dropped above the
+        // forced-move return, so that return cannot leave one behind either;
+        // below the asserts above, so a rejected call keeps the caller's tree.
+        if !reuse {
+            self.root = None;
+        }
+
         self.scratch.choices.clear();
         match root_players {
             None => state.choices_into(ctx, &mut self.scratch.choices),
@@ -612,8 +652,19 @@ impl<G: Game> Searcher<G> {
                 "mcts: search called on a state where player {perspective} has no legal choices"
             ),
             // With one action, nothing the opponents do changes which action you
-            // take, so this is sound at a simultaneous root too.
+            // take, so this is sound at a simultaneous root too. It returns
+            // before the first determinization, so `RootCheck` never sees this
+            // exit and an `advance` that consumes the root decision goes
+            // unreported here; `search`'s doc says so.
             1 => {
+                // This return builds no root, so a retained one has to describe
+                // the position by itself. It does describe it — `self.root` is
+                // Some here only because the caller asked to reuse it — but a
+                // node promoted out of a joint child that was never descended
+                // into carries no marginals, and `reuse_joint` reads those.
+                if let (Some(players), Some(root)) = (root_players, self.root.as_mut()) {
+                    root.ensure_simul(players);
+                }
                 return SearchResult {
                     choice: self.scratch.choices[0].clone(),
                     iterations_used: 0,
@@ -627,11 +678,6 @@ impl<G: Game> Searcher<G> {
             _ => {}
         }
 
-        // Anything retained from an earlier search describes an earlier
-        // position unless `reuse_subtree` re-rooted it since.
-        if !self.tree_is_current {
-            self.root = None;
-        }
         if self.root.is_none() {
             self.root = Some(Node::new_root(root_player));
             self.scratch.root_fully_expanded = false;
@@ -642,7 +688,7 @@ impl<G: Game> Searcher<G> {
             scratch,
             side,
             root,
-            tree_is_current,
+            ..
         } = self;
         let root = root.as_mut().expect("root was just created");
 
@@ -652,6 +698,15 @@ impl<G: Game> Searcher<G> {
         root.player = root_player;
         root.cumulative_reward = 0.0;
 
+        // Installed here rather than on the first iteration, so a search that
+        // completes none — cancelled, or already past its deadline — still
+        // leaves a root that answers `Node::simultaneous_players` truthfully
+        // and sends `reuse_joint` down its ordinary miss path. The forced-move
+        // return above is the third such exit and does its own.
+        if let Some(players) = root_players {
+            root.ensure_simul(players);
+        }
+
         // The mask outlives both the search and the tree, and
         // `refresh_root_legal` caches it on arm count alone: a mask left by an
         // earlier position with the same number of arms would pass that test.
@@ -660,6 +715,8 @@ impl<G: Game> Searcher<G> {
         let deadline = Deadline::new(cfg.time_limit_ms);
         let reused_iterations = root.visits;
         let mut iterations_used: u32 = 0;
+        #[cfg(debug_assertions)]
+        let mut root_check = RootCheck::<G::Choice>::new();
 
         let stop_reason = loop {
             if target != 0 && root.visits >= target {
@@ -676,7 +733,11 @@ impl<G: Game> Searcher<G> {
 
             G::begin_iteration(side);
             state.determinize_into(&mut scratch.state, ctx, perspective, rng);
+            #[cfg(debug_assertions)]
+            let before = root_check.read::<G>(&scratch.state, ctx, root_players, perspective);
             scratch.state.advance(ctx, side, perspective, rng);
+            #[cfg(debug_assertions)]
+            root_check.check::<G>(&scratch.state, ctx, root_players, perspective, before);
 
             let rewards = run_iteration::<G, R>(root, scratch, ctx, side, cfg, perspective, rng);
 
@@ -715,8 +776,6 @@ impl<G: Game> Searcher<G> {
             Some(_) => extract_marginal::<G, R>(root, state, ctx, scratch, perspective, cfg, rng),
         };
 
-        *tree_is_current = false;
-
         SearchResult {
             choice,
             iterations_used,
@@ -741,6 +800,154 @@ fn most_visited<C>(root: &Node<C>) -> Option<usize> {
         }
     }
     best
+}
+
+/// A root decision, as much of one as `Status` carries.
+#[cfg(debug_assertions)]
+#[derive(PartialEq, Eq, Debug)]
+enum RootDecision {
+    Active(u8),
+    Simultaneous(PlayerSet),
+    Terminal,
+}
+
+#[cfg(debug_assertions)]
+fn root_decision<G: Game>(state: &G, ctx: &G::Context) -> RootDecision {
+    match state.status(ctx) {
+        Status::Active { player } => RootDecision::Active(player),
+        Status::Simultaneous { players } => RootDecision::Simultaneous(players),
+        Status::Terminal(_) => RootDecision::Terminal,
+    }
+}
+
+#[cfg(debug_assertions)]
+fn root_choices_into<G: Game>(
+    state: &G,
+    ctx: &G::Context,
+    root_players: Option<PlayerSet>,
+    perspective: u8,
+    out: &mut Vec<G::Choice>,
+) {
+    out.clear();
+    match root_players {
+        None => state.choices_into(ctx, out),
+        Some(_) => state.choices_for_into(ctx, perspective, out),
+    }
+}
+
+/// The answer lists either side of the root `advance`.
+///
+/// Held across the whole search and cleared rather than rebuilt: the lists are
+/// re-read on every iteration, and a check that allocated per iteration would
+/// cost more than the enumeration it exists to police — and would break the
+/// saturated-search allocation guarantee in every debug build.
+#[cfg(debug_assertions)]
+struct RootCheck<C> {
+    before: Vec<C>,
+    after: Vec<C>,
+    /// Positions in `before`, built only when the lists disagree on order. An
+    /// unmoved decision settles on the elementwise compare, so a conforming
+    /// game never allocates this.
+    index: HashTable<u32>,
+}
+
+#[cfg(debug_assertions)]
+impl<C: Eq + Hash> RootCheck<C> {
+    fn new() -> Self {
+        RootCheck {
+            before: Vec::new(),
+            after: Vec::new(),
+            index: HashTable::new(),
+        }
+    }
+
+    /// The root decision this determinization presents, and its answer list.
+    fn read<G: Game<Choice = C>>(
+        &mut self,
+        state: &G,
+        ctx: &G::Context,
+        root_players: Option<PlayerSet>,
+        perspective: u8,
+    ) -> RootDecision {
+        let decision = root_decision(state, ctx);
+        self.before.clear();
+        if decision == RootDecision::Terminal {
+            return decision;
+        }
+        root_choices_into(state, ctx, root_players, perspective, &mut self.before);
+        decision
+    }
+
+    /// The root `advance` may resolve decisions the tree does not model, but
+    /// not the one being searched: the answer list and the root player were
+    /// read from the state the caller handed in, and everything after this
+    /// point is built on the advanced one.
+    ///
+    /// Read across `advance` on one determinized state rather than against the
+    /// caller's, so a game whose determinizations legitimately differ from the
+    /// real position — up to and including one that samples a world already
+    /// over — is not accused of an `advance` it may never have written.
+    ///
+    /// Every iteration, not just the first: an `advance` that consumes the root
+    /// decision in some worlds and not others is exactly what a side model
+    /// resolving an opponent's hidden decision produces, and checking one
+    /// determinization would clear it whenever the first world sampled happens
+    /// to behave.
+    fn check<G: Game<Choice = C>>(
+        &mut self,
+        state: &G,
+        ctx: &G::Context,
+        root_players: Option<PlayerSet>,
+        perspective: u8,
+        before: RootDecision,
+    ) {
+        let after = root_decision(state, ctx);
+        assert!(
+            after == before,
+            "mcts: Game::advance moved the root past the decision the search was called on. \
+             The determinization presented {:?} and the state advance left behind presents \
+             {after:?}, so the search would read one position's legal moves and build the tree \
+             on another's. An advance at the root may fast-forward past decisions the tree does \
+             not model, never past the one being searched.",
+            before
+        );
+        if after == RootDecision::Terminal {
+            return;
+        }
+
+        self.after.clear();
+        root_choices_into(state, ctx, root_players, perspective, &mut self.after);
+        // `choices_into` promises no order, but a game that enumerates an
+        // unmoved decision the same way twice settles here without hashing or a
+        // scan. A merely permuted list is legal and falls through.
+        if self.after == self.before {
+            return;
+        }
+        let RootCheck { before, after, index } = self;
+        // A wide root that merely permuted its list would pay a scan per choice
+        // here on every iteration, which is the quadratic shape the crate's own
+        // `CHILD_INDEX_THRESHOLD` exists to avoid.
+        let same_set = if before.len() > G::CHILD_INDEX_THRESHOLD {
+            index.clear();
+            for (i, choice) in before.iter().enumerate() {
+                index.insert_unique(hash_of(choice), i as u32, |&j| hash_of(&before[j as usize]));
+            }
+            after
+                .iter()
+                .all(|c| index.find(hash_of(c), |&j| before[j as usize] == *c).is_some())
+        } else {
+            after.iter().all(|c| before.contains(c))
+        };
+        assert!(
+            after.len() == before.len() && same_set,
+            "mcts: Game::advance moved the root past the decision the search was called on. \
+             The same player is still to act, but on a different decision: the determinization \
+             offered {} choices and the state advance left behind offers {}, and they are not \
+             the same set. The root's children were enumerated before this call.",
+            before.len(),
+            after.len()
+        );
+    }
 }
 
 /// The perspective player's own action at a simultaneous root, with that

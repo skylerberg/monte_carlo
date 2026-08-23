@@ -9,7 +9,7 @@
 //! flag being a true claim about determinizations says nothing about the arms
 //! that promotion carried in.
 //!
-//! Both fixtures here determinize by cloning, so the invariant they declare is
+//! Every fixture here determinizes by cloning, so the invariant they declare is
 //! genuinely true and the failures below cannot be blamed on the game. They are
 //! local rather than shared because nothing in `tests/common` puts a chance
 //! draw between two plies, which is what makes a node's action set depend on
@@ -17,6 +17,8 @@
 
 use mcts::rand_core::{Rng, SeedableRng};
 use mcts::{Config, Game, JointChoices, Node, PlayerSet, Searcher, Status};
+use std::cell::Cell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use wyrand::WyRand;
 
 fn rng(seed: u64) -> WyRand {
@@ -352,5 +354,118 @@ fn a_re_rooted_sequential_root_never_offers_a_child_the_position_withholds() {
         after, before,
         "the withheld child had {before} visits when the search started and has {after} \
          now, so the fast path kept marking it available"
+    );
+}
+
+/// A narrowing line — four choices, then three, then two — whose context is a
+/// fuse: every `status` call burns one, and the call that finds it empty
+/// panics. That is a search abandoned mid-flight at a chosen depth, without a
+/// fixture that has to lie about anything else.
+///
+/// The widths narrow so that a root left over from the previous ply holds more
+/// children than the position has choices, which is what the fast path's own
+/// consistency check measures.
+#[derive(Clone, Default)]
+struct FusedLine {
+    ply: u8,
+}
+
+impl FusedLine {
+    fn width(ply: u8) -> u8 {
+        match ply {
+            0 => 4,
+            1 => 3,
+            _ => 2,
+        }
+    }
+}
+
+impl Game for FusedLine {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = Cell<u32>;
+    type Side = ();
+
+    const ROOT_CHOICES_INVARIANT: bool = true;
+
+    fn status(&self, fuse: &Cell<u32>) -> Status<[f64; 2]> {
+        let left = fuse.get();
+        assert!(left > 0, "the fuse burned out");
+        fuse.set(left - 1);
+        if self.ply >= 3 {
+            Status::Terminal([0.5, 0.5])
+        } else {
+            Status::Active { player: 0 }
+        }
+    }
+
+    fn choices_into(&self, _: &Cell<u32>, out: &mut Vec<u8>) {
+        out.extend(0..Self::width(self.ply));
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &Cell<u32>, _: &u8, _: &mut R) {
+        self.ply += 1;
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, _: &Cell<u32>, _: &mut R) -> [f64; 2] {
+        self.ply = 3;
+        [0.5, 0.5]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &Cell<u32>, _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}
+
+/// `root_fully_expanded` describes the root the search armed it for, and lives
+/// in the scratch that outlives it. A search that unwinds after arming it used
+/// to leave both the flag and the tree in place, so the *next* search — at a
+/// different position, with no reuse asked for — took the fast path against a
+/// root it never expanded: in release, `apply_choice` calls with choices the
+/// state does not offer; in debug, the fast path's own assertion, blaming a
+/// game that declared the invariant correctly.
+#[test]
+fn an_abandoned_search_does_not_leave_the_next_root_marked_expanded() {
+    let fuse = Cell::new(u32::MAX);
+    let mut game = FusedLine::default();
+    let mut searcher = Searcher::new(&game);
+
+    let first = searcher.search(&game, &fuse, 0, &config(100), None, &mut rng(3));
+    assert!(searcher.reuse_subtree(&first.choice));
+    game.ply = 1;
+
+    // Long enough to complete the pass that arms the flag, short enough that
+    // the search never finishes its budget.
+    fuse.set(60);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        searcher.search(&game, &fuse, 0, &config(100), None, &mut rng(5));
+    }));
+    assert!(outcome.is_err(), "the fuse must burn out mid-search");
+
+    fuse.set(u32::MAX);
+    game.ply = 2;
+    let next = searcher.search(&game, &fuse, 0, &config(100), None, &mut rng(7));
+
+    assert_eq!(
+        next.reused_iterations, 0,
+        "the abandoned search left the tree armed"
+    );
+    assert!(
+        next.choice < FusedLine::width(2),
+        "the search returned {}, which is not one of this position's choices",
+        next.choice
+    );
+    assert_eq!(
+        searcher
+            .tree()
+            .expect("a search leaves a tree")
+            .children()
+            .len(),
+        usize::from(FusedLine::width(2)),
+        "the root was reused from the previous ply"
     );
 }

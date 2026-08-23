@@ -3,6 +3,7 @@ mod common;
 use common::{AlwaysWin, CountToThree, GameTree, TreeNode};
 use mcts::rand_core::SeedableRng;
 use mcts::{Config, Node, Searcher, StopReason};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use wyrand::WyRand;
 
 fn rng(seed: u64) -> WyRand {
@@ -101,6 +102,521 @@ fn a_forced_move_skips_the_search() {
     assert_eq!(result.stop_reason, StopReason::SingleChoice);
     assert_eq!(result.iterations_used, 0);
     assert_eq!(result.choice, 0);
+}
+
+/// `width` choices, then a ply with exactly one, then `width` again — the shape
+/// a search needs to reach a forced move with a re-rooted tree in hand and
+/// still have a position to search afterwards.
+fn forced_middle_ply(width: usize) -> GameTree {
+    let third_ply = || {
+        let mut leaves: Vec<TreeNode> = (0..width - 1).map(|_| TreeNode::winner(1)).collect();
+        leaves.push(TreeNode::winner(0));
+        TreeNode::branch(leaves)
+    };
+    let forced = || TreeNode::branch(vec![third_ply()]);
+    GameTree {
+        state: TreeNode::branch((0..width).map(|_| forced()).collect()),
+        active_player: 0,
+        player_count: 2,
+    }
+}
+
+/// A forced move returns without searching, so it never asks whether the tree
+/// it is holding still describes anything. Leaving it armed hands the *next*
+/// search — one nobody asked to reuse anything for — a tree rooted two
+/// positions back, whose children can name moves that do not exist here.
+#[test]
+fn a_forced_move_disarms_the_tree() {
+    let mut game = forced_middle_ply(4);
+    let mut searcher = Searcher::new(&game);
+
+    let first = searcher.search(&game, &(), 0, &config(100), None, &mut rng(5));
+    assert!(searcher.reuse_subtree(&first.choice));
+    game.apply(&first.choice);
+
+    let forced = searcher.search(&game, &(), 1, &config(100), None, &mut rng(5));
+    assert_eq!(forced.stop_reason, StopReason::SingleChoice);
+    game.apply(&forced.choice);
+
+    // Deliberately no reuse_subtree call here.
+    let third = searcher.search(&game, &(), 0, &config(100), None, &mut rng(5));
+
+    assert_eq!(
+        third.reused_iterations, 0,
+        "the forced move left the tree armed, so the next search inherited it"
+    );
+    assert_eq!(third.root_visits, 100);
+
+    let legal: Vec<usize> = (0..game.state.children.len()).collect();
+    assert!(
+        legal.contains(&third.choice),
+        "chose {} which is not legal here; legal choices are {legal:?}",
+        third.choice
+    );
+}
+
+/// The disarm has to happen above the forced-move return, not just at it: a
+/// tree the caller never re-rooted describes an older position still, and
+/// leaving it there would let a `reuse_subtree` after the forced move arm a
+/// root two positions behind.
+#[test]
+fn a_forced_move_on_an_unarmed_searcher_drops_the_stale_tree() {
+    let mut game = forced_middle_ply(4);
+    let mut searcher = Searcher::new(&game);
+
+    let first = searcher.search(&game, &(), 0, &config(100), None, &mut rng(5));
+    // Deliberately no reuse_subtree call here.
+    game.apply(&first.choice);
+
+    let forced = searcher.search(&game, &(), 1, &config(100), None, &mut rng(5));
+    assert_eq!(forced.stop_reason, StopReason::SingleChoice);
+    assert!(
+        searcher.tree().is_none(),
+        "the forced move kept a tree describing an older position"
+    );
+}
+
+/// Disarming is not discarding. A forced move is still a move the caller can
+/// re-root on, and dropping the tree there would throw away a whole search for
+/// a ply that had nothing to decide.
+#[test]
+fn a_forced_move_still_leaves_a_reusable_tree() {
+    let mut game = forced_middle_ply(4);
+    let mut searcher = Searcher::new(&game);
+
+    let first = searcher.search(&game, &(), 0, &config(200), None, &mut rng(5));
+    assert!(searcher.reuse_subtree(&first.choice));
+    game.apply(&first.choice);
+
+    let forced = searcher.search(&game, &(), 1, &config(200), None, &mut rng(5));
+    assert_eq!(forced.stop_reason, StopReason::SingleChoice);
+
+    assert!(
+        searcher.reuse_subtree(&forced.choice),
+        "the forced move's successor is still in the tree"
+    );
+    game.apply(&forced.choice);
+
+    let third = searcher.search(&game, &(), 0, &config(200), None, &mut rng(5));
+    assert!(
+        third.reused_iterations > 0,
+        "re-rooting after a forced move carried nothing forward"
+    );
+}
+
+/// Three plies of three choices, so a search, a caught panic and a further move
+/// all have somewhere to go.
+fn three_plies() -> GameTree {
+    let leaves = || TreeNode::branch((0..3).map(|_| TreeNode::winner(0)).collect());
+    let middle = || TreeNode::branch((0..3).map(|_| leaves()).collect());
+    GameTree {
+        state: TreeNode::branch((0..3).map(|_| middle()).collect()),
+        active_player: 0,
+        player_count: 2,
+    }
+}
+
+/// A search that unwinds never reaches its own last statement, so a flag
+/// cleared there stays set. A caller who catches the panic and searches again
+/// then gets the abandoned position's statistics pooled into the answer.
+#[test]
+fn a_panicking_search_disarms_the_tree() {
+    let mut game = three_plies();
+    let mut searcher = Searcher::new(&game);
+
+    let first = searcher.search(&game, &(), 0, &config(100), None, &mut rng(5));
+    assert!(searcher.reuse_subtree(&first.choice));
+    game.apply(&first.choice);
+
+    // The documented terminal-state panic, so no panicking fixture is needed.
+    let terminal = GameTree {
+        state: TreeNode::winner(0),
+        active_player: 1,
+        player_count: 2,
+    };
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        searcher.search(&terminal, &(), 1, &config(100), None, &mut rng(5));
+    }));
+    assert!(outcome.is_err(), "searching a terminal state must panic");
+
+    game.apply(&0);
+    let next = searcher.search(&game, &(), 0, &config(100), None, &mut rng(5));
+
+    assert_eq!(
+        next.reused_iterations, 0,
+        "the abandoned search left the tree armed"
+    );
+    assert_eq!(next.root_visits, 100);
+}
+
+/// Three plies of three choices whose context is a fuse: every `status` call
+/// burns one, and the call that finds it empty panics. Local rather than
+/// shared, because a pooled search needs a `Sync` context and nothing in
+/// `tests/common` has one.
+#[cfg(feature = "parallel")]
+#[derive(Clone, Default)]
+struct FusedFork {
+    ply: u8,
+}
+
+#[cfg(feature = "parallel")]
+impl mcts::Game for FusedFork {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = std::sync::atomic::AtomicU32;
+    type Side = ();
+
+    fn status(&self, fuse: &Self::Context) -> mcts::Status<[f64; 2]> {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Saturating, so the fuse stays burned out for every worker that
+        // reaches it rather than wrapping back to a full one.
+        fuse.fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
+            .expect("the fuse burned out");
+        if self.ply >= 3 {
+            mcts::Status::Terminal([0.5, 0.5])
+        } else {
+            mcts::Status::Active { player: 0 }
+        }
+    }
+
+    fn choices_into(&self, _: &Self::Context, out: &mut Vec<u8>) {
+        out.extend(0..3);
+    }
+
+    fn apply_choice<R: mcts::rand_core::Rng + ?Sized>(
+        &mut self,
+        _: &Self::Context,
+        _: &u8,
+        _: &mut R,
+    ) {
+        self.ply += 1;
+    }
+
+    fn rollout<R: mcts::rand_core::Rng + ?Sized>(
+        &mut self,
+        _: &Self::Context,
+        _: &mut R,
+    ) -> [f64; 2] {
+        self.ply = 3;
+        [0.5, 0.5]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: mcts::rand_core::Rng + ?Sized>(
+        &self,
+        dest: &mut Self,
+        _: &Self::Context,
+        _: u8,
+        _: &mut R,
+    ) {
+        dest.clone_from(self);
+    }
+}
+
+/// The pool's disarm is per worker and there is no pool-level one: `search`
+/// re-raises a worker's panic straight out of the join, leaving every
+/// `Searcher` in `self.workers` exactly as its thread left it. The workers that
+/// finished had disarmed themselves; the abandoned one had not, so the next
+/// pooled search — a new position, no reuse asked for — pooled the abandoned
+/// position's visits and rewards into the merged answer.
+#[cfg(feature = "parallel")]
+#[test]
+fn a_panicking_pooled_search_disarms_every_worker() {
+    use mcts::RootParallel;
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+    const THREADS: usize = 2;
+    const BUDGET: u32 = 100;
+
+    let fuse = AtomicU32::new(u32::MAX);
+    let mut game = FusedFork::default();
+    let mut pool = RootParallel::new(THREADS, &game, |worker| rng(worker as u64 + 1));
+
+    let first = pool.search(&game, &fuse, 0, &config(BUDGET), None);
+    pool.reuse_subtree(&first.choice);
+    game.ply = 1;
+
+    // Long enough for every worker to arm itself and grow a tree worth
+    // pooling, short enough that none of them spends its budget.
+    fuse.store(300, Relaxed);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        pool.search(&game, &fuse, 0, &config(BUDGET), None);
+    }));
+    assert!(outcome.is_err(), "the fuse must burn out mid-search");
+
+    fuse.store(u32::MAX, Relaxed);
+    game.ply = 2;
+    // Deliberately no reuse_subtree call here.
+    let next = pool.search(&game, &fuse, 0, &config(BUDGET), None);
+
+    assert_eq!(
+        next.reused_iterations, 0,
+        "an abandoned worker carried the previous position's tree into the merge"
+    );
+    assert_eq!(next.root_visits, BUDGET * THREADS as u32);
+    assert!(
+        next.choice < 3,
+        "chose {}, which is not one of this position's choices",
+        next.choice
+    );
+}
+
+/// `Game::advance` may fast-forward past decisions the tree does not model, but
+/// not past the one being searched: the root player and the answer list are
+/// read before it and the tree is built after it, so consuming the root
+/// decision returns somebody else's move.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "Game::advance moved the root past the decision")]
+fn advance_may_not_consume_the_root_decision() {
+    use mcts::rand_core::Rng;
+    use mcts::{Game, Status};
+
+    #[derive(Clone, Default)]
+    struct SkipsTheRoot {
+        ply: u8,
+    }
+
+    impl Game for SkipsTheRoot {
+        type Choice = usize;
+        type Rewards = [f64; 2];
+        type Context = ();
+        type Side = ();
+
+        fn status(&self, _: &()) -> Status<[f64; 2]> {
+            if self.ply >= 2 {
+                Status::Terminal([0.5, 0.5])
+            } else {
+                Status::Active { player: self.ply }
+            }
+        }
+
+        fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+            out.extend([0, 1]);
+        }
+
+        fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), _: &usize, _: &mut R) {
+            self.ply += 1;
+        }
+
+        fn rollout<R: Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+            self.ply = 2;
+            [0.5, 0.5]
+        }
+
+        fn new_buffer(&self) -> Self {
+            self.clone()
+        }
+
+        fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+            dest.clone_from(self);
+        }
+
+        fn advance<R: Rng + ?Sized>(&mut self, _: &(), _: &mut (), _: u8, _: &mut R) {
+            self.ply = self.ply.max(1);
+        }
+    }
+
+    let game = SkipsTheRoot::default();
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &config(50), None, &mut rng(2));
+}
+
+/// Same player, different decision — the case a side model is likeliest to
+/// reach, and the one a status comparison alone cannot see. The tree's root
+/// children are this position's moves, so an `advance` that resolves the root
+/// ply returns one of the *next* position's.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "on a different decision")]
+fn advance_may_not_swap_the_root_decision_for_the_next_one() {
+    use mcts::rand_core::Rng;
+    use mcts::{Game, Status};
+
+    #[derive(Clone, Default)]
+    struct ResolvesTheRootPly {
+        ply: u8,
+    }
+
+    impl Game for ResolvesTheRootPly {
+        type Choice = usize;
+        type Rewards = [f64; 2];
+        type Context = ();
+        type Side = ();
+
+        fn status(&self, _: &()) -> Status<[f64; 2]> {
+            if self.ply >= 2 {
+                Status::Terminal([0.5, 0.5])
+            } else {
+                Status::Active { player: 1 }
+            }
+        }
+
+        fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+            match self.ply {
+                0 => out.extend([0, 1, 2]),
+                _ => out.extend([10, 11, 12]),
+            }
+        }
+
+        fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), _: &usize, _: &mut R) {
+            self.ply += 1;
+        }
+
+        fn rollout<R: Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+            self.ply = 2;
+            [0.5, 0.5]
+        }
+
+        fn new_buffer(&self) -> Self {
+            self.clone()
+        }
+
+        fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+            dest.clone_from(self);
+        }
+
+        fn advance<R: Rng + ?Sized>(&mut self, _: &(), _: &mut (), _: u8, _: &mut R) {
+            self.ply = self.ply.max(1);
+        }
+    }
+
+    let game = ResolvesTheRootPly::default();
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 1, &config(50), None, &mut rng(2));
+}
+
+/// A side model that resolves a hidden opponent decision does not resolve it in
+/// every world: the root decision can survive one determinization and be
+/// consumed by the next. Checking a single iteration would clear such a game
+/// whenever the first world sampled happens to behave.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "on a different decision")]
+fn advance_may_not_consume_the_root_decision_in_only_some_worlds() {
+    use mcts::rand_core::Rng;
+    use mcts::{Game, Status};
+
+    #[derive(Clone, Default)]
+    struct ResolvesTheRootPlyLater {
+        ply: u8,
+    }
+
+    impl Game for ResolvesTheRootPlyLater {
+        type Choice = usize;
+        type Rewards = [f64; 2];
+        type Context = ();
+        /// Advance calls so far, standing in for the hidden state a side model
+        /// would consult.
+        type Side = u32;
+
+        fn status(&self, _: &()) -> Status<[f64; 2]> {
+            if self.ply >= 2 {
+                Status::Terminal([0.5, 0.5])
+            } else {
+                Status::Active { player: 1 }
+            }
+        }
+
+        fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+            match self.ply {
+                0 => out.extend([0, 1, 2]),
+                _ => out.extend([10, 11, 12]),
+            }
+        }
+
+        fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), _: &usize, _: &mut R) {
+            self.ply += 1;
+        }
+
+        fn rollout<R: Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+            self.ply = 2;
+            [0.5, 0.5]
+        }
+
+        fn new_buffer(&self) -> Self {
+            self.clone()
+        }
+
+        fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+            dest.clone_from(self);
+        }
+
+        fn advance<R: Rng + ?Sized>(&mut self, _: &(), side: &mut u32, _: u8, _: &mut R) {
+            *side += 1;
+            if *side > 1 {
+                self.ply = self.ply.max(1);
+            }
+        }
+    }
+
+    let game = ResolvesTheRootPlyLater::default();
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 1, &config(50), None, &mut rng(2));
+}
+
+/// The root check reads the determinized state across `advance`, not against
+/// the state the caller handed in, because those two are not required to agree:
+/// a game whose terminality depends on hidden information samples worlds that
+/// are already over. An iteration scores such a world and moves on, and blaming
+/// `Game::advance` for it points at a method the game need not have written.
+#[test]
+fn a_determinization_may_sample_a_world_that_is_already_over() {
+    use mcts::rand_core::Rng;
+    use mcts::{Game, Status};
+
+    #[derive(Clone, Default)]
+    struct MaybeOver {
+        ply: u8,
+        over: bool,
+    }
+
+    impl Game for MaybeOver {
+        type Choice = usize;
+        type Rewards = [f64; 2];
+        type Context = ();
+        type Side = ();
+
+        fn status(&self, _: &()) -> Status<[f64; 2]> {
+            if self.over || self.ply >= 2 {
+                Status::Terminal([0.5, 0.5])
+            } else {
+                Status::Active { player: 0 }
+            }
+        }
+
+        fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+            out.extend([0, 1]);
+        }
+
+        fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), _: &usize, _: &mut R) {
+            self.ply += 1;
+        }
+
+        fn rollout<R: Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+            self.ply = 2;
+            [0.5, 0.5]
+        }
+
+        fn new_buffer(&self) -> Self {
+            self.clone()
+        }
+
+        // One world in four is over before the search has played anything.
+        fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, rng: &mut R) {
+            dest.clone_from(self);
+            dest.over = rng.next_u64() & 3 == 0;
+        }
+    }
+
+    let game = MaybeOver::default();
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &(), 0, &config(200), None, &mut rng(4));
+    assert!(result.choice < 2, "chose {}", result.choice);
+    assert_eq!(result.root_visits, 200);
 }
 
 #[test]
