@@ -293,10 +293,11 @@ fn a_promoted_simultaneous_root_never_offers_an_arm_the_position_withholds() {
     );
 }
 
-/// The sequential twin of the test above, and the worse of the two: a
-/// sequential root's answer is an unfiltered `most_visited` over the children,
-/// so a leftover child that the fast path keeps marking available can win the
-/// search outright and hand the caller a move it cannot play.
+/// The sequential twin of the test above. A leftover child that the fast path
+/// keeps marking available is selected and applied during the descent, so the
+/// search spends its budget in a world it cannot play — and before the root's
+/// answer was filtered against the position, that child could win the search
+/// outright and be handed to the caller.
 #[test]
 fn a_re_rooted_sequential_root_never_offers_a_child_the_position_withholds() {
     let game = ChanceLine::default();
@@ -355,6 +356,153 @@ fn a_re_rooted_sequential_root_never_offers_a_child_the_position_withholds() {
         "the withheld child had {before} visits when the search started and has {after} \
          now, so the fast path kept marking it available"
     );
+}
+
+/// Two plies of [`WideLine::WIDTH`] choices, where [`WideLine::BEST`] pays best
+/// at the second and the low third of the rest pay nearly as well, so the
+/// answer is contested rather than obvious.
+///
+/// Determinization is a clone, so `ROOT_CHOICES_INVARIANT` is a true claim at
+/// both roots and the fast path is reached in both searches. Nothing here is
+/// about legality: the point is what the fast path does to the counts.
+#[derive(Clone, Default)]
+struct WideLine {
+    first: Option<u8>,
+    second: Option<u8>,
+}
+
+impl WideLine {
+    const WIDTH: u8 = 40;
+    const BEST: u8 = 5;
+
+    fn payoff(second: u8) -> f64 {
+        if second == Self::BEST {
+            0.60
+        } else if second < Self::WIDTH / 3 {
+            0.58
+        } else {
+            0.20
+        }
+    }
+}
+
+impl Game for WideLine {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    const ROOT_CHOICES_INVARIANT: bool = true;
+
+    fn status(&self, _: &()) -> Status<[f64; 2]> {
+        match (self.first, self.second) {
+            (Some(_), Some(second)) => {
+                let payoff = Self::payoff(second);
+                Status::Terminal([payoff, 1.0 - payoff])
+            }
+            _ => Status::Active { player: 0 },
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<u8>) {
+        out.extend(0..Self::WIDTH);
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), choice: &u8, _: &mut R) {
+        if self.first.is_none() {
+            self.first = Some(*choice);
+        } else {
+            self.second = Some(*choice);
+        }
+    }
+
+    fn apply_joint<R: Rng + ?Sized>(&mut self, _: &(), _: JointChoices<'_, u8>, _: &mut R) {
+        unreachable!("WideLine has no simultaneous node")
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 2] {
+        while self.second.is_none() {
+            let choice = below(rng, u64::from(Self::WIDTH)) as u8;
+            self.apply_choice(&(), &choice, rng);
+        }
+        let payoff = Self::payoff(self.second.expect("the loop just filled it"));
+        [payoff, 1.0 - payoff]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}
+
+/// The fast path skips expansion outright, and expansion is where a root child
+/// is credited with the iteration that offered it. A re-rooted root reaches the
+/// fast path on its second iteration — `reuse_subtree` clears the flag, so
+/// iteration 1 runs a full pass and writes the availabilities progressive
+/// expansion left at the node that is now the root, which are not uniform — and
+/// from then on visits climb while those numbers stand still.
+///
+/// What this pins is the count itself: every iteration of a search under the
+/// invariant is an opportunity for every root child, so no child can end with
+/// fewer opportunities than the search ran iterations, and none can hold more
+/// selections than opportunities. Both are read straight off the tree, because
+/// the consequences downstream are not things a test can hold still: the root
+/// ranking divides one count by the other, and the early-termination bound
+/// assumes an opportunity can arrive with every iteration. A debug build stops
+/// at the crate's own assertion on the pair before either of them can be
+/// observed, which is the honest way for this to fail and not the failure this
+/// test is describing.
+#[test]
+fn a_re_rooted_root_counts_the_opportunities_the_fast_path_skips() {
+    for seed in 0..8u64 {
+        let mut rng = rng(seed);
+        let game = WideLine::default();
+        let mut searcher = Searcher::new(&game);
+        let first = searcher.search(&game, &(), 0, &config(120), None, &mut rng);
+
+        let mut real = game.clone();
+        real.apply_choice(&(), &first.choice, &mut rng);
+        assert!(searcher.reuse_subtree(&first.choice), "a root child");
+
+        let second = searcher.search(&real, &(), 0, &config(1_200), None, &mut rng);
+        assert!(
+            second.reused_iterations * 8 < second.iterations_used,
+            "seed {seed}: the promoted node arrived with {} visits against {} more to \
+             come, which is not lopsided enough for a frozen denominator to show",
+            second.reused_iterations,
+            second.iterations_used
+        );
+        let root = searcher.tree().expect("a search leaves a tree");
+        for child in root.children() {
+            let choice = child.edge().choice().expect("a sequential root's child");
+            assert!(
+                child.availability() >= second.iterations_used,
+                "seed {seed}: child {choice} was offered {} times by a search that ran \
+                 {} iterations, every one of which offered every child",
+                child.availability(),
+                second.iterations_used
+            );
+            assert!(
+                child.visits() <= child.availability(),
+                "seed {seed}: child {choice} holds {} selections against {} \
+                 opportunities to make them",
+                child.visits(),
+                child.availability()
+            );
+        }
+        assert_eq!(
+            second.choice,
+            WideLine::BEST,
+            "seed {seed}: answered {} (worth {}) where {} pays {}",
+            second.choice,
+            WideLine::payoff(second.choice),
+            WideLine::BEST,
+            WideLine::payoff(WideLine::BEST)
+        );
+    }
 }
 
 /// A narrowing line — four choices, then three, then two — whose context is a

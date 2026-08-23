@@ -44,6 +44,7 @@ mod duct;
 mod early_stop;
 mod game;
 mod node;
+mod rank;
 mod search;
 mod select;
 mod util;

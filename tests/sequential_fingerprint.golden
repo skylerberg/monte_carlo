@@ -250,17 +250,17 @@ wide_two_ply40 seed=1 iters=50 et=false pb=0 => choice=20 used=50 reused=0 stop=
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=1 iters=50 => first=20 reused=true second=8 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
+reuse seed=1 iters=50 => first=20 reused=true second=0 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
 always_win seed=1 iters=50 et=true pb=0 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
     3 16 16.000000000000
-count_to_three seed=1 iters=50 et=true pb=0 => choice=1 used=31 reused=0 stop=Proven root_visits=31 best_visits=26 best_mean=0.807692307692 nodes=12 depth=4
+count_to_three seed=1 iters=50 et=true pb=0 => choice=1 used=37 reused=0 stop=Proven root_visits=37 best_visits=32 best_mean=0.843750000000 nodes=12 depth=4
     0 5 0.000000000000
-    1 26 21.000000000000
-trap seed=1 iters=50 et=true pb=0 => choice=1 used=38 reused=0 stop=Proven root_visits=38 best_visits=26 best_mean=0.653846153846 nodes=18 depth=4
+    1 32 27.000000000000
+trap seed=1 iters=50 et=true pb=0 => choice=1 used=44 reused=0 stop=Proven root_visits=44 best_visits=32 best_mean=0.718750000000 nodes=18 depth=4
     0 12 2.000000000000
-    1 26 17.000000000000
+    1 32 23.000000000000
 wide200 seed=1 iters=50 et=true pb=0 => choice=0 used=50 reused=0 stop=Budget root_visits=50 best_visits=1 best_mean=0.000000000000 nodes=201 depth=2
     0 1 0.000000000000
     1 1 0.000000000000
@@ -462,14 +462,14 @@ wide200 seed=1 iters=50 et=true pb=0 => choice=0 used=50 reused=0 stop=Budget ro
     197 0 0.000000000000
     198 0 0.000000000000
     199 0 0.000000000000
-wide_two_ply40 seed=1 iters=50 et=true pb=0 => choice=20 used=49 reused=0 stop=Proven root_visits=49 best_visits=4 best_mean=0.250000000000 nodes=50 depth=3
+wide_two_ply40 seed=1 iters=50 et=true pb=0 => choice=20 used=50 reused=0 stop=Budget root_visits=50 best_visits=4 best_mean=0.250000000000 nodes=51 depth=3
     0 2 0.000000000000
     1 2 0.000000000000
     2 2 0.000000000000
     3 2 0.000000000000
     4 2 0.000000000000
     5 2 0.000000000000
-    6 1 0.000000000000
+    6 2 0.000000000000
     7 1 0.000000000000
     8 1 0.000000000000
     9 1 0.000000000000
@@ -503,7 +503,7 @@ wide_two_ply40 seed=1 iters=50 et=true pb=0 => choice=20 used=49 reused=0 stop=P
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=1 iters=50 => first=20 reused=true second=8 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
+reuse seed=1 iters=50 => first=20 reused=true second=0 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
 always_win seed=1 iters=50 et=false pb=0.75 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
@@ -756,7 +756,7 @@ wide_two_ply40 seed=1 iters=50 et=false pb=0.75 => choice=20 used=50 reused=0 st
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=1 iters=50 => first=20 reused=true second=8 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
+reuse seed=1 iters=50 => first=20 reused=true second=0 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
 always_win seed=1 iters=500 et=false pb=0 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
@@ -1009,18 +1009,18 @@ wide_two_ply40 seed=1 iters=500 et=false pb=0 => choice=3 used=500 reused=0 stop
     37 11 0.000000000000
     38 11 0.000000000000
     39 16 1.000000000000
-reuse seed=1 iters=500 => first=3 reused=true second=2 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
+reuse seed=1 iters=500 => first=3 reused=true second=3 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
 always_win seed=1 iters=500 et=true pb=0 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
     3 166 166.000000000000
-count_to_three seed=1 iters=500 et=true pb=0 => choice=1 used=256 reused=0 stop=Proven root_visits=256 best_visits=251 best_mean=0.980079681275 nodes=12 depth=4
+count_to_three seed=1 iters=500 et=true pb=0 => choice=1 used=474 reused=0 stop=Proven root_visits=474 best_visits=469 best_mean=0.989339019190 nodes=12 depth=4
     0 5 0.000000000000
-    1 251 246.000000000000
-trap seed=1 iters=500 et=true pb=0 => choice=1 used=263 reused=0 stop=Proven root_visits=263 best_visits=251 best_mean=0.964143426295 nodes=18 depth=4
+    1 469 464.000000000000
+trap seed=1 iters=500 et=true pb=0 => choice=1 used=481 reused=0 stop=Proven root_visits=481 best_visits=469 best_mean=0.980810234542 nodes=18 depth=4
     0 12 2.000000000000
-    1 251 242.000000000000
-wide200 seed=1 iters=500 et=true pb=0 => choice=199 used=351 reused=0 stop=Proven root_visits=351 best_visits=152 best_mean=1.000000000000 nodes=201 depth=2
+    1 469 460.000000000000
+wide200 seed=1 iters=500 et=true pb=0 => choice=199 used=470 reused=0 stop=Proven root_visits=470 best_visits=271 best_mean=1.000000000000 nodes=201 depth=2
     0 1 0.000000000000
     1 1 0.000000000000
     2 1 0.000000000000
@@ -1220,7 +1220,7 @@ wide200 seed=1 iters=500 et=true pb=0 => choice=199 used=351 reused=0 stop=Prove
     196 1 0.000000000000
     197 1 0.000000000000
     198 1 0.000000000000
-    199 152 152.000000000000
+    199 271 271.000000000000
 wide_two_ply40 seed=1 iters=500 et=true pb=0 => choice=3 used=500 reused=0 stop=Budget root_visits=500 best_visits=16 best_mean=0.062500000000 nodes=501 depth=3
     0 11 0.000000000000
     1 11 0.000000000000
@@ -1262,7 +1262,7 @@ wide_two_ply40 seed=1 iters=500 et=true pb=0 => choice=3 used=500 reused=0 stop=
     37 11 0.000000000000
     38 11 0.000000000000
     39 16 1.000000000000
-reuse seed=1 iters=500 => first=3 reused=true second=2 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
+reuse seed=1 iters=500 => first=3 reused=true second=3 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
 always_win seed=1 iters=500 et=false pb=0.75 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
@@ -1515,7 +1515,7 @@ wide_two_ply40 seed=1 iters=500 et=false pb=0.75 => choice=3 used=500 reused=0 s
     37 11 0.000000000000
     38 11 0.000000000000
     39 16 1.000000000000
-reuse seed=1 iters=500 => first=3 reused=true second=2 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
+reuse seed=1 iters=500 => first=3 reused=true second=3 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
 always_win seed=1 iters=5000 et=false pb=0 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
@@ -1768,18 +1768,18 @@ wide_two_ply40 seed=1 iters=5000 et=false pb=0 => choice=20 used=5000 reused=0 s
     37 124 1.000000000000
     38 124 1.000000000000
     39 124 1.000000000000
-reuse seed=1 iters=5000 => first=20 reused=true second=8 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
+reuse seed=1 iters=5000 => first=20 reused=true second=17 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
 always_win seed=1 iters=5000 et=true pb=0 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
     3 1666 1666.000000000000
-count_to_three seed=1 iters=5000 et=true pb=0 => choice=1 used=2506 reused=0 stop=Proven root_visits=2506 best_visits=2501 best_mean=0.997600959616 nodes=12 depth=4
+count_to_three seed=1 iters=5000 et=true pb=0 => choice=1 used=4974 reused=0 stop=Proven root_visits=4974 best_visits=4969 best_mean=0.998792513584 nodes=12 depth=4
     0 5 0.000000000000
-    1 2501 2495.000000000000
-trap seed=1 iters=5000 et=true pb=0 => choice=1 used=2513 reused=0 stop=Proven root_visits=2513 best_visits=2501 best_mean=0.995601759296 nodes=18 depth=4
+    1 4969 4963.000000000000
+trap seed=1 iters=5000 et=true pb=0 => choice=1 used=4981 reused=0 stop=Proven root_visits=4981 best_visits=4969 best_mean=0.996981283961 nodes=18 depth=4
     0 12 2.000000000000
-    1 2501 2490.000000000000
-wide200 seed=1 iters=5000 et=true pb=0 => choice=199 used=2701 reused=0 stop=Proven root_visits=2701 best_visits=2303 best_mean=1.000000000000 nodes=201 depth=2
+    1 4969 4954.000000000000
+wide200 seed=1 iters=5000 et=true pb=0 => choice=199 used=4971 reused=0 stop=Proven root_visits=4971 best_visits=4573 best_mean=1.000000000000 nodes=201 depth=2
     0 2 0.000000000000
     1 2 0.000000000000
     2 2 0.000000000000
@@ -1979,8 +1979,8 @@ wide200 seed=1 iters=5000 et=true pb=0 => choice=199 used=2701 reused=0 stop=Pro
     196 2 0.000000000000
     197 2 0.000000000000
     198 2 0.000000000000
-    199 2303 2303.000000000000
-wide_two_ply40 seed=1 iters=5000 et=true pb=0 => choice=20 used=4985 reused=0 stop=Proven root_visits=4985 best_visits=141 best_mean=0.014184397163 nodes=1641 depth=3
+    199 4573 4573.000000000000
+wide_two_ply40 seed=1 iters=5000 et=true pb=0 => choice=20 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=141 best_mean=0.014184397163 nodes=1641 depth=3
     0 125 1.000000000000
     1 125 1.000000000000
     2 125 1.000000000000
@@ -1989,22 +1989,22 @@ wide_two_ply40 seed=1 iters=5000 et=true pb=0 => choice=20 used=4985 reused=0 st
     5 125 1.000000000000
     6 125 1.000000000000
     7 125 1.000000000000
-    8 124 1.000000000000
-    9 124 1.000000000000
-    10 124 1.000000000000
-    11 124 1.000000000000
-    12 124 1.000000000000
-    13 124 1.000000000000
-    14 124 1.000000000000
-    15 124 1.000000000000
-    16 124 1.000000000000
-    17 124 1.000000000000
-    18 124 1.000000000000
-    19 124 1.000000000000
+    8 125 1.000000000000
+    9 125 1.000000000000
+    10 125 1.000000000000
+    11 125 1.000000000000
+    12 125 1.000000000000
+    13 125 1.000000000000
+    14 125 1.000000000000
+    15 125 1.000000000000
+    16 125 1.000000000000
+    17 125 1.000000000000
+    18 125 1.000000000000
+    19 125 1.000000000000
     20 141 2.000000000000
-    21 124 1.000000000000
-    22 124 1.000000000000
-    23 124 1.000000000000
+    21 125 1.000000000000
+    22 125 1.000000000000
+    23 125 1.000000000000
     24 124 1.000000000000
     25 124 1.000000000000
     26 124 1.000000000000
@@ -2021,7 +2021,7 @@ wide_two_ply40 seed=1 iters=5000 et=true pb=0 => choice=20 used=4985 reused=0 st
     37 124 1.000000000000
     38 124 1.000000000000
     39 124 1.000000000000
-reuse seed=1 iters=5000 => first=20 reused=true second=8 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
+reuse seed=1 iters=5000 => first=20 reused=true second=17 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
 always_win seed=1 iters=5000 et=false pb=0.75 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
@@ -2274,7 +2274,7 @@ wide_two_ply40 seed=1 iters=5000 et=false pb=0.75 => choice=20 used=5000 reused=
     37 124 1.000000000000
     38 124 1.000000000000
     39 124 1.000000000000
-reuse seed=1 iters=5000 => first=20 reused=true second=8 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
+reuse seed=1 iters=5000 => first=20 reused=true second=17 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
 always_win seed=7 iters=50 et=false pb=0 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
@@ -2527,17 +2527,17 @@ wide_two_ply40 seed=7 iters=50 et=false pb=0 => choice=0 used=50 reused=0 stop=B
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=7 iters=50 => first=0 reused=true second=19 used=48 inherited=2 root_visits=50 best_mean=1.000000000000
+reuse seed=7 iters=50 => first=0 reused=true second=0 used=48 inherited=2 root_visits=50 best_mean=1.000000000000
 always_win seed=7 iters=50 et=true pb=0 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
     3 16 16.000000000000
-count_to_three seed=7 iters=50 et=true pb=0 => choice=1 used=29 reused=0 stop=Proven root_visits=29 best_visits=26 best_mean=0.884615384615 nodes=9 depth=4
+count_to_three seed=7 iters=50 et=true pb=0 => choice=1 used=35 reused=0 stop=Proven root_visits=35 best_visits=32 best_mean=0.906250000000 nodes=9 depth=4
     0 3 0.000000000000
-    1 26 23.000000000000
-trap seed=7 iters=50 et=true pb=0 => choice=1 used=46 reused=0 stop=Proven root_visits=46 best_visits=26 best_mean=0.615384615385 nodes=18 depth=4
+    1 32 29.000000000000
+trap seed=7 iters=50 et=true pb=0 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=30 best_mean=0.666666666667 nodes=18 depth=4
     0 20 3.000000000000
-    1 26 16.000000000000
+    1 30 20.000000000000
 wide200 seed=7 iters=50 et=true pb=0 => choice=0 used=50 reused=0 stop=Budget root_visits=50 best_visits=1 best_mean=0.000000000000 nodes=201 depth=2
     0 1 0.000000000000
     1 1 0.000000000000
@@ -2780,7 +2780,7 @@ wide_two_ply40 seed=7 iters=50 et=true pb=0 => choice=0 used=50 reused=0 stop=Bu
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=7 iters=50 => first=0 reused=true second=19 used=48 inherited=2 root_visits=50 best_mean=1.000000000000
+reuse seed=7 iters=50 => first=0 reused=true second=0 used=48 inherited=2 root_visits=50 best_mean=1.000000000000
 always_win seed=7 iters=50 et=false pb=0.75 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
@@ -3033,7 +3033,7 @@ wide_two_ply40 seed=7 iters=50 et=false pb=0.75 => choice=0 used=50 reused=0 sto
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=7 iters=50 => first=0 reused=true second=19 used=48 inherited=2 root_visits=50 best_mean=1.000000000000
+reuse seed=7 iters=50 => first=0 reused=true second=0 used=48 inherited=2 root_visits=50 best_mean=1.000000000000
 always_win seed=7 iters=500 et=false pb=0 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
@@ -3245,7 +3245,7 @@ wide200 seed=7 iters=500 et=false pb=0 => choice=199 used=500 reused=0 stop=Budg
     197 1 0.000000000000
     198 1 0.000000000000
     199 301 301.000000000000
-wide_two_ply40 seed=7 iters=500 et=false pb=0 => choice=0 used=500 reused=0 stop=Budget root_visits=500 best_visits=17 best_mean=0.058823529412 nodes=501 depth=3
+wide_two_ply40 seed=7 iters=500 et=false pb=0 => choice=20 used=500 reused=0 stop=Budget root_visits=500 best_visits=16 best_mean=0.062500000000 nodes=501 depth=3
     0 17 1.000000000000
     1 11 0.000000000000
     2 11 0.000000000000
@@ -3286,18 +3286,18 @@ wide_two_ply40 seed=7 iters=500 et=false pb=0 => choice=0 used=500 reused=0 stop
     37 16 1.000000000000
     38 11 0.000000000000
     39 11 0.000000000000
-reuse seed=7 iters=500 => first=0 reused=true second=19 used=483 inherited=17 root_visits=500 best_mean=1.000000000000
+reuse seed=7 iters=500 => first=20 reused=true second=0 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
 always_win seed=7 iters=500 et=true pb=0 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
     3 166 166.000000000000
-count_to_three seed=7 iters=500 et=true pb=0 => choice=1 used=254 reused=0 stop=Proven root_visits=254 best_visits=251 best_mean=0.988047808765 nodes=9 depth=4
+count_to_three seed=7 iters=500 et=true pb=0 => choice=1 used=472 reused=0 stop=Proven root_visits=472 best_visits=469 best_mean=0.993603411514 nodes=9 depth=4
     0 3 0.000000000000
-    1 251 248.000000000000
-trap seed=7 iters=500 et=true pb=0 => choice=1 used=271 reused=0 stop=Proven root_visits=271 best_visits=251 best_mean=0.960159362550 nodes=18 depth=4
+    1 469 466.000000000000
+trap seed=7 iters=500 et=true pb=0 => choice=1 used=489 reused=0 stop=Proven root_visits=489 best_visits=469 best_mean=0.978678038380 nodes=18 depth=4
     0 20 3.000000000000
-    1 251 241.000000000000
-wide200 seed=7 iters=500 et=true pb=0 => choice=199 used=351 reused=0 stop=Proven root_visits=351 best_visits=152 best_mean=1.000000000000 nodes=201 depth=2
+    1 469 459.000000000000
+wide200 seed=7 iters=500 et=true pb=0 => choice=199 used=470 reused=0 stop=Proven root_visits=470 best_visits=271 best_mean=1.000000000000 nodes=201 depth=2
     0 1 0.000000000000
     1 1 0.000000000000
     2 1 0.000000000000
@@ -3497,8 +3497,8 @@ wide200 seed=7 iters=500 et=true pb=0 => choice=199 used=351 reused=0 stop=Prove
     196 1 0.000000000000
     197 1 0.000000000000
     198 1 0.000000000000
-    199 152 152.000000000000
-wide_two_ply40 seed=7 iters=500 et=true pb=0 => choice=0 used=500 reused=0 stop=Budget root_visits=500 best_visits=17 best_mean=0.058823529412 nodes=501 depth=3
+    199 271 271.000000000000
+wide_two_ply40 seed=7 iters=500 et=true pb=0 => choice=20 used=500 reused=0 stop=Budget root_visits=500 best_visits=16 best_mean=0.062500000000 nodes=501 depth=3
     0 17 1.000000000000
     1 11 0.000000000000
     2 11 0.000000000000
@@ -3539,7 +3539,7 @@ wide_two_ply40 seed=7 iters=500 et=true pb=0 => choice=0 used=500 reused=0 stop=
     37 16 1.000000000000
     38 11 0.000000000000
     39 11 0.000000000000
-reuse seed=7 iters=500 => first=0 reused=true second=19 used=483 inherited=17 root_visits=500 best_mean=1.000000000000
+reuse seed=7 iters=500 => first=20 reused=true second=0 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
 always_win seed=7 iters=500 et=false pb=0.75 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
@@ -3751,7 +3751,7 @@ wide200 seed=7 iters=500 et=false pb=0.75 => choice=199 used=500 reused=0 stop=B
     197 1 0.000000000000
     198 1 0.000000000000
     199 301 301.000000000000
-wide_two_ply40 seed=7 iters=500 et=false pb=0.75 => choice=0 used=500 reused=0 stop=Budget root_visits=500 best_visits=17 best_mean=0.058823529412 nodes=501 depth=3
+wide_two_ply40 seed=7 iters=500 et=false pb=0.75 => choice=20 used=500 reused=0 stop=Budget root_visits=500 best_visits=16 best_mean=0.062500000000 nodes=501 depth=3
     0 17 1.000000000000
     1 11 0.000000000000
     2 11 0.000000000000
@@ -3792,7 +3792,7 @@ wide_two_ply40 seed=7 iters=500 et=false pb=0.75 => choice=0 used=500 reused=0 s
     37 16 1.000000000000
     38 11 0.000000000000
     39 11 0.000000000000
-reuse seed=7 iters=500 => first=0 reused=true second=19 used=483 inherited=17 root_visits=500 best_mean=1.000000000000
+reuse seed=7 iters=500 => first=20 reused=true second=0 used=484 inherited=16 root_visits=500 best_mean=1.000000000000
 always_win seed=7 iters=5000 et=false pb=0 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
@@ -4045,18 +4045,18 @@ wide_two_ply40 seed=7 iters=5000 et=false pb=0 => choice=0 used=5000 reused=0 st
     37 125 1.000000000000
     38 125 1.000000000000
     39 125 1.000000000000
-reuse seed=7 iters=5000 => first=0 reused=true second=19 used=4875 inherited=125 root_visits=5000 best_mean=1.000000000000
+reuse seed=7 iters=5000 => first=0 reused=true second=5 used=4875 inherited=125 root_visits=5000 best_mean=1.000000000000
 always_win seed=7 iters=5000 et=true pb=0 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
     3 1666 1666.000000000000
-count_to_three seed=7 iters=5000 et=true pb=0 => choice=1 used=2504 reused=0 stop=Proven root_visits=2504 best_visits=2501 best_mean=0.998000799680 nodes=10 depth=4
+count_to_three seed=7 iters=5000 et=true pb=0 => choice=1 used=4972 reused=0 stop=Proven root_visits=4972 best_visits=4969 best_mean=0.998993761320 nodes=10 depth=4
     0 3 0.000000000000
-    1 2501 2496.000000000000
-trap seed=7 iters=5000 et=true pb=0 => choice=1 used=2521 reused=0 stop=Proven root_visits=2521 best_visits=2501 best_mean=0.995201919232 nodes=18 depth=4
+    1 4969 4964.000000000000
+trap seed=7 iters=5000 et=true pb=0 => choice=1 used=4989 reused=0 stop=Proven root_visits=4989 best_visits=4969 best_mean=0.996780036225 nodes=18 depth=4
     0 20 3.000000000000
-    1 2501 2489.000000000000
-wide200 seed=7 iters=5000 et=true pb=0 => choice=199 used=2701 reused=0 stop=Proven root_visits=2701 best_visits=2303 best_mean=1.000000000000 nodes=201 depth=2
+    1 4969 4953.000000000000
+wide200 seed=7 iters=5000 et=true pb=0 => choice=199 used=4971 reused=0 stop=Proven root_visits=4971 best_visits=4573 best_mean=1.000000000000 nodes=201 depth=2
     0 2 0.000000000000
     1 2 0.000000000000
     2 2 0.000000000000
@@ -4256,7 +4256,7 @@ wide200 seed=7 iters=5000 et=true pb=0 => choice=199 used=2701 reused=0 stop=Pro
     196 2 0.000000000000
     197 2 0.000000000000
     198 2 0.000000000000
-    199 2303 2303.000000000000
+    199 4573 4573.000000000000
 wide_two_ply40 seed=7 iters=5000 et=true pb=0 => choice=0 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=125 best_mean=0.008000000000 nodes=1641 depth=3
     0 125 1.000000000000
     1 125 1.000000000000
@@ -4298,7 +4298,7 @@ wide_two_ply40 seed=7 iters=5000 et=true pb=0 => choice=0 used=5000 reused=0 sto
     37 125 1.000000000000
     38 125 1.000000000000
     39 125 1.000000000000
-reuse seed=7 iters=5000 => first=0 reused=true second=19 used=4875 inherited=125 root_visits=5000 best_mean=1.000000000000
+reuse seed=7 iters=5000 => first=0 reused=true second=5 used=4875 inherited=125 root_visits=5000 best_mean=1.000000000000
 always_win seed=7 iters=5000 et=false pb=0.75 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
@@ -4551,7 +4551,7 @@ wide_two_ply40 seed=7 iters=5000 et=false pb=0.75 => choice=0 used=5000 reused=0
     37 125 1.000000000000
     38 125 1.000000000000
     39 125 1.000000000000
-reuse seed=7 iters=5000 => first=0 reused=true second=19 used=4875 inherited=125 root_visits=5000 best_mean=1.000000000000
+reuse seed=7 iters=5000 => first=0 reused=true second=5 used=4875 inherited=125 root_visits=5000 best_mean=1.000000000000
 always_win seed=21 iters=50 et=false pb=0 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
@@ -4804,17 +4804,17 @@ wide_two_ply40 seed=21 iters=50 et=false pb=0 => choice=16 used=50 reused=0 stop
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=21 iters=50 => first=16 reused=true second=13 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
+reuse seed=21 iters=50 => first=16 reused=true second=0 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
 always_win seed=21 iters=50 et=true pb=0 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
     3 16 16.000000000000
-count_to_three seed=21 iters=50 et=true pb=0 => choice=1 used=28 reused=0 stop=Proven root_visits=28 best_visits=26 best_mean=0.846153846154 nodes=9 depth=4
+count_to_three seed=21 iters=50 et=true pb=0 => choice=1 used=34 reused=0 stop=Proven root_visits=34 best_visits=32 best_mean=0.875000000000 nodes=9 depth=4
     0 2 0.000000000000
-    1 26 22.000000000000
-trap seed=21 iters=50 et=true pb=0 => choice=1 used=37 reused=0 stop=Proven root_visits=37 best_visits=26 best_mean=0.653846153846 nodes=18 depth=4
+    1 32 28.000000000000
+trap seed=21 iters=50 et=true pb=0 => choice=1 used=43 reused=0 stop=Proven root_visits=43 best_visits=32 best_mean=0.718750000000 nodes=18 depth=4
     0 11 3.000000000000
-    1 26 17.000000000000
+    1 32 23.000000000000
 wide200 seed=21 iters=50 et=true pb=0 => choice=0 used=50 reused=0 stop=Budget root_visits=50 best_visits=1 best_mean=0.000000000000 nodes=201 depth=2
     0 1 0.000000000000
     1 1 0.000000000000
@@ -5057,7 +5057,7 @@ wide_two_ply40 seed=21 iters=50 et=true pb=0 => choice=16 used=50 reused=0 stop=
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=21 iters=50 => first=16 reused=true second=13 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
+reuse seed=21 iters=50 => first=16 reused=true second=0 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
 always_win seed=21 iters=50 et=false pb=0.75 => choice=1 used=50 reused=0 stop=Budget root_visits=50 best_visits=17 best_mean=1.000000000000 nodes=40 depth=4
     1 17 17.000000000000
     2 17 17.000000000000
@@ -5310,7 +5310,7 @@ wide_two_ply40 seed=21 iters=50 et=false pb=0.75 => choice=16 used=50 reused=0 s
     37 1 0.000000000000
     38 1 0.000000000000
     39 1 0.000000000000
-reuse seed=21 iters=50 => first=16 reused=true second=13 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
+reuse seed=21 iters=50 => first=16 reused=true second=0 used=46 inherited=4 root_visits=50 best_mean=1.000000000000
 always_win seed=21 iters=500 et=false pb=0 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
@@ -5563,18 +5563,18 @@ wide_two_ply40 seed=21 iters=500 et=false pb=0 => choice=16 used=500 reused=0 st
     37 16 1.000000000000
     38 16 1.000000000000
     39 10 0.000000000000
-reuse seed=21 iters=500 => first=16 reused=true second=13 used=479 inherited=21 root_visits=500 best_mean=1.000000000000
+reuse seed=21 iters=500 => first=16 reused=true second=0 used=479 inherited=21 root_visits=500 best_mean=1.000000000000
 always_win seed=21 iters=500 et=true pb=0 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
     3 166 166.000000000000
-count_to_three seed=21 iters=500 et=true pb=0 => choice=1 used=253 reused=0 stop=Proven root_visits=253 best_visits=251 best_mean=0.984063745020 nodes=9 depth=4
+count_to_three seed=21 iters=500 et=true pb=0 => choice=1 used=471 reused=0 stop=Proven root_visits=471 best_visits=469 best_mean=0.991471215352 nodes=9 depth=4
     0 2 0.000000000000
-    1 251 247.000000000000
-trap seed=21 iters=500 et=true pb=0 => choice=1 used=262 reused=0 stop=Proven root_visits=262 best_visits=251 best_mean=0.964143426295 nodes=18 depth=4
+    1 469 465.000000000000
+trap seed=21 iters=500 et=true pb=0 => choice=1 used=480 reused=0 stop=Proven root_visits=480 best_visits=469 best_mean=0.980810234542 nodes=18 depth=4
     0 11 3.000000000000
-    1 251 242.000000000000
-wide200 seed=21 iters=500 et=true pb=0 => choice=199 used=351 reused=0 stop=Proven root_visits=351 best_visits=152 best_mean=1.000000000000 nodes=201 depth=2
+    1 469 460.000000000000
+wide200 seed=21 iters=500 et=true pb=0 => choice=199 used=470 reused=0 stop=Proven root_visits=470 best_visits=271 best_mean=1.000000000000 nodes=201 depth=2
     0 1 0.000000000000
     1 1 0.000000000000
     2 1 0.000000000000
@@ -5774,7 +5774,7 @@ wide200 seed=21 iters=500 et=true pb=0 => choice=199 used=351 reused=0 stop=Prov
     196 1 0.000000000000
     197 1 0.000000000000
     198 1 0.000000000000
-    199 152 152.000000000000
+    199 271 271.000000000000
 wide_two_ply40 seed=21 iters=500 et=true pb=0 => choice=16 used=500 reused=0 stop=Budget root_visits=500 best_visits=21 best_mean=0.095238095238 nodes=501 depth=3
     0 11 0.000000000000
     1 11 0.000000000000
@@ -5816,7 +5816,7 @@ wide_two_ply40 seed=21 iters=500 et=true pb=0 => choice=16 used=500 reused=0 sto
     37 16 1.000000000000
     38 16 1.000000000000
     39 10 0.000000000000
-reuse seed=21 iters=500 => first=16 reused=true second=13 used=479 inherited=21 root_visits=500 best_mean=1.000000000000
+reuse seed=21 iters=500 => first=16 reused=true second=0 used=479 inherited=21 root_visits=500 best_mean=1.000000000000
 always_win seed=21 iters=500 et=false pb=0.75 => choice=1 used=500 reused=0 stop=Budget root_visits=500 best_visits=167 best_mean=1.000000000000 nodes=40 depth=4
     1 167 167.000000000000
     2 167 167.000000000000
@@ -6069,7 +6069,7 @@ wide_two_ply40 seed=21 iters=500 et=false pb=0.75 => choice=16 used=500 reused=0
     37 16 1.000000000000
     38 16 1.000000000000
     39 10 0.000000000000
-reuse seed=21 iters=500 => first=16 reused=true second=13 used=479 inherited=21 root_visits=500 best_mean=1.000000000000
+reuse seed=21 iters=500 => first=16 reused=true second=0 used=479 inherited=21 root_visits=500 best_mean=1.000000000000
 always_win seed=21 iters=5000 et=false pb=0 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
@@ -6322,18 +6322,18 @@ wide_two_ply40 seed=21 iters=5000 et=false pb=0 => choice=16 used=5000 reused=0 
     37 124 1.000000000000
     38 124 1.000000000000
     39 124 1.000000000000
-reuse seed=21 iters=5000 => first=16 reused=true second=13 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
+reuse seed=21 iters=5000 => first=16 reused=true second=31 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
 always_win seed=21 iters=5000 et=true pb=0 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
     3 1666 1666.000000000000
-count_to_three seed=21 iters=5000 et=true pb=0 => choice=1 used=2503 reused=0 stop=Proven root_visits=2503 best_visits=2501 best_mean=0.998000799680 nodes=9 depth=4
+count_to_three seed=21 iters=5000 et=true pb=0 => choice=1 used=4971 reused=0 stop=Proven root_visits=4971 best_visits=4969 best_mean=0.998993761320 nodes=9 depth=4
     0 2 0.000000000000
-    1 2501 2496.000000000000
-trap seed=21 iters=5000 et=true pb=0 => choice=1 used=2512 reused=0 stop=Proven root_visits=2512 best_visits=2501 best_mean=0.995601759296 nodes=18 depth=4
+    1 4969 4964.000000000000
+trap seed=21 iters=5000 et=true pb=0 => choice=1 used=4980 reused=0 stop=Proven root_visits=4980 best_visits=4969 best_mean=0.996981283961 nodes=18 depth=4
     0 11 3.000000000000
-    1 2501 2490.000000000000
-wide200 seed=21 iters=5000 et=true pb=0 => choice=199 used=2701 reused=0 stop=Proven root_visits=2701 best_visits=2303 best_mean=1.000000000000 nodes=201 depth=2
+    1 4969 4954.000000000000
+wide200 seed=21 iters=5000 et=true pb=0 => choice=199 used=4971 reused=0 stop=Proven root_visits=4971 best_visits=4573 best_mean=1.000000000000 nodes=201 depth=2
     0 2 0.000000000000
     1 2 0.000000000000
     2 2 0.000000000000
@@ -6533,7 +6533,7 @@ wide200 seed=21 iters=5000 et=true pb=0 => choice=199 used=2701 reused=0 stop=Pr
     196 2 0.000000000000
     197 2 0.000000000000
     198 2 0.000000000000
-    199 2303 2303.000000000000
+    199 4573 4573.000000000000
 wide_two_ply40 seed=21 iters=5000 et=true pb=0 => choice=16 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=141 best_mean=0.014184397163 nodes=1641 depth=3
     0 125 1.000000000000
     1 125 1.000000000000
@@ -6575,7 +6575,7 @@ wide_two_ply40 seed=21 iters=5000 et=true pb=0 => choice=16 used=5000 reused=0 s
     37 124 1.000000000000
     38 124 1.000000000000
     39 124 1.000000000000
-reuse seed=21 iters=5000 => first=16 reused=true second=13 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
+reuse seed=21 iters=5000 => first=16 reused=true second=31 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
 always_win seed=21 iters=5000 et=false pb=0.75 => choice=1 used=5000 reused=0 stop=Budget root_visits=5000 best_visits=1667 best_mean=1.000000000000 nodes=40 depth=4
     1 1667 1667.000000000000
     2 1667 1667.000000000000
@@ -6828,4 +6828,4 @@ wide_two_ply40 seed=21 iters=5000 et=false pb=0.75 => choice=16 used=5000 reused
     37 124 1.000000000000
     38 124 1.000000000000
     39 124 1.000000000000
-reuse seed=21 iters=5000 => first=16 reused=true second=13 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000
+reuse seed=21 iters=5000 => first=16 reused=true second=31 used=4859 inherited=141 root_visits=5000 best_mean=1.000000000000

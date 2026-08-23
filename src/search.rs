@@ -12,6 +12,7 @@ use crate::duct;
 use crate::early_stop;
 use crate::game::{Game, JointChoices, PlayerSet, Rewards, SimultaneousPolicy, Status};
 use crate::node::{JointKey, Node};
+use crate::rank::{leader_of, Candidate};
 use crate::select::select;
 use crate::util::below;
 #[cfg(debug_assertions)]
@@ -21,7 +22,7 @@ use crate::util::hash_of;
 const DEADLINE_CHECK_MASK: u32 = 31;
 
 /// How the returned move is read off a simultaneous root. Ignored at a
-/// sequential root, which is always the most-visited child.
+/// sequential root, which always answers with its leading child.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RootPolicy {
@@ -37,7 +38,14 @@ pub enum RootPolicy {
     /// one-hot, so this is identical to [`RootPolicy::MostVisited`].
     #[default]
     Sampled,
-    /// Return the perspective player's most-selected action.
+    /// Return the perspective player's leading action: the one carrying the
+    /// most weight under the policy in use, which is not the same thing as the
+    /// most-selected one.
+    ///
+    /// An action is selectable only on the iterations that offered it, so raw
+    /// selections rank by legality rate as much as by value; both policies
+    /// divide that out, and [`crate::Marginals::most_visited`] is the raw count
+    /// if you want it.
     ///
     /// Deterministic and reproducible, and exploitable wherever the equilibrium
     /// is mixed. Worth choosing when you need pinned output, or when you are
@@ -68,9 +76,22 @@ pub struct Config {
     /// node loses the term at exactly those nodes, silently.
     pub progressive_bias_weight: f64,
     /// Stop early once the remaining iterations provably cannot change the
-    /// chosen move: the leader's visit margin over every rival exceeds them, so
-    /// no rival can draw level. Only applies when `iterations` is non-zero, and
-    /// a search that spends its whole budget reports [`StopReason::Budget`]
+    /// chosen move.
+    ///
+    /// The answer is the best mean reward among the candidates the search
+    /// selected enough times to trust, and a mean moves with the *rewards*, so
+    /// almost nothing about it can be proved from the counts in hand — the
+    /// rewards this crate accumulates are whatever the game returned, not
+    /// values clamped into [`Config::min_reward`]`..=`[`Config::max_reward`].
+    /// What is still proved is a claim about evidence: every rival is so far
+    /// from being sampled enough to be trusted that the iterations left cannot
+    /// get it there. That is a narrow case. Where two candidates are both well
+    /// sampled the search now spends its whole budget and reports
+    /// [`StopReason::Budget`]; turning this on costs a branch per iteration and
+    /// buys nothing there. A branch and not a scan: while more iterations are
+    /// left than the evidence bar is high, no rival can be out of reach and the
+    /// pass over the root's candidates is skipped without being made. Only applies when `iterations` is non-zero, and a
+    /// search that spends its whole budget reports [`StopReason::Budget`]
     /// rather than [`StopReason::Proven`].
     pub early_termination: bool,
     /// Bounds of the reward scale. Set these to your game's actual range.
@@ -153,8 +174,7 @@ pub struct SimultaneousConfig {
     /// the exponent — including why the `1 / sqrt(t)` schedule this crate first
     /// shipped does not converge at all.
     pub regret_matching_exploration: f64,
-    /// Whether a simultaneous root returns a sampled move or the most-selected
-    /// one.
+    /// Whether a simultaneous root returns a sampled move or the leading one.
     pub root_policy: RootPolicy,
 }
 
@@ -211,12 +231,15 @@ pub enum StopReason {
     Deadline,
     /// The cancellation flag was set.
     Cancelled,
-    /// The remaining iterations could not have changed the answer: the chosen
-    /// move led by more visits than there were iterations left to spend. A
-    /// search that exhausted its budget reports `Budget`, and a `RootParallel`
-    /// merge over more than one worker never reports this — the proof is about
-    /// one worker's tree, and the merged answer is read off statistics that
-    /// proof never saw.
+    /// The remaining iterations could not have changed the answer: every rival
+    /// is too far from being sampled enough to be trusted for the iterations
+    /// left to get it there, and an untrusted candidate never outranks a
+    /// trusted one. Nothing weaker is stamped with this — the answer is a mean
+    /// reward, and no count bounds a mean, so a root whose rivals are all well
+    /// sampled runs to its budget. A search that exhausted its budget reports
+    /// `Budget`, and a `RootParallel` merge over more than one worker never
+    /// reports this — the proof is about one worker's tree, and the merged
+    /// answer is read off statistics that proof never saw.
     Proven,
 }
 
@@ -225,10 +248,16 @@ pub enum StopReason {
 pub struct SearchResult<C> {
     /// The chosen root move.
     ///
-    /// At a sequential root, the most visited root choice. At a simultaneous
-    /// root, the *perspective* player's own action — drawn from their mixed
-    /// strategy under [`RootPolicy::Sampled`] — never a joint tuple and never
-    /// read off a joint successor.
+    /// Always a choice legal in the `state` the search was called on, whatever
+    /// the determinizations offered.
+    ///
+    /// At a sequential root, the leading root choice: the best mean reward among
+    /// the choices the search sampled enough times to trust, with the selection
+    /// rate — visits over the iterations that offered the choice — breaking
+    /// ties. At a simultaneous root, the *perspective*
+    /// player's own action — drawn from their mixed strategy under
+    /// [`RootPolicy::Sampled`] — never a joint tuple and never read off a joint
+    /// successor.
     pub choice: C,
     /// Iterations run by this call, excluding any inherited from a reused tree.
     pub iterations_used: u32,
@@ -310,9 +339,14 @@ struct Scratch<G: Game> {
     /// `arity` sampling probabilities per frame. `f32` is ample: the floor keeps
     /// a probability well inside f32's precision, and it halves the buffer.
     sim_probs: Vec<f32>,
-    /// Which of a simultaneous root's arms are legal in the *real* position.
-    /// Filled once per search during root extraction, not per iteration.
+    /// Which of the root's candidates — a sequential root's children, or a
+    /// simultaneous root's arms for the perspective player — are legal in the
+    /// *real* position. Filled once per search, not per iteration.
     root_legal: Vec<bool>,
+    /// Whether every action the real position offers already has a candidate in
+    /// the tree, so no future determinization can introduce a new one. The
+    /// early-termination proof needs this and the mask together.
+    root_legal_complete: bool,
     /// Whether the root has had a full expansion pass.
     ///
     /// A root re-rooted from a subtree has children, but only the handful
@@ -357,6 +391,7 @@ impl<G: Game> Searcher<G> {
                 sim_frames: Vec::new(),
                 sim_probs: Vec::new(),
                 root_legal: Vec::new(),
+                root_legal_complete: false,
                 root_fully_expanded: false,
             },
             side: Default::default(),
@@ -521,11 +556,16 @@ impl<G: Game> Searcher<G> {
     /// `state`.
     ///
     /// Returns false if there is no retained tree, if the root is not
-    /// simultaneous, if `player` does not act there, or if nothing has yet
-    /// enumerated `player`'s actions at that root — a search that completed no
-    /// iterations, or a forced move, leaves a root that names its participants
-    /// and holds no arms. `out` is cleared first and is a caller buffer, so
-    /// repeated calls do not grow it.
+    /// simultaneous, if `player` does not act there, if `player` has no legal
+    /// action in `state`, or if nothing has yet enumerated `player`'s actions at
+    /// that root — a search that completed no iterations, or a forced move,
+    /// leaves a root that names its participants and holds no arms. `out` is
+    /// cleared first and is a caller buffer, so repeated calls do not grow it.
+    ///
+    /// On `true` the pairs are never empty: where the tree's arms and this
+    /// position's legal actions are disjoint, they are a uniform distribution
+    /// over the latter, which is the same fallback [`Searcher::search`] draws
+    /// its answer from.
     ///
     /// Poll this once a turn, not once an iteration: renormalizing needs this
     /// position's own legal set, and `&self` means enumerating it into a
@@ -560,6 +600,9 @@ impl<G: Game> Searcher<G> {
 
         let mut choices = Vec::new();
         state.choices_for_into(ctx, player, &mut choices);
+        if choices.is_empty() {
+            return false;
+        }
         let start = simul.starts[slot] as usize;
         let mut legal = vec![false; simul.slot_len(slot)];
         for choice in &choices {
@@ -574,6 +617,16 @@ impl<G: Game> Searcher<G> {
             if legal[arm] {
                 out.push((simul.arm_choices[start + arm].clone(), weight));
             }
+        }
+        if out.is_empty() {
+            // Every arm the tree holds for this slot is unplayable here, so the
+            // search has nothing to say about the position — which is a real
+            // state at low budgets, not an error. `Searcher::search` answers it
+            // with a uniform draw over this player's own list; answering with
+            // the distribution that draw comes from keeps the two extractions
+            // the same thing, and keeps the sum-to-1 promise above.
+            let share = 1.0 / choices.len() as f64;
+            out.extend(choices.into_iter().map(|choice| (choice, share)));
         }
         true
     }
@@ -598,9 +651,9 @@ impl<G: Game> Searcher<G> {
     /// and this call panics if `perspective` is not one of the acting players.
     /// [`Config::early_termination`] has no effect at a simultaneous root under
     /// [`crate::SimultaneousPolicy::RegretMatching`] and [`StopReason::Proven`]
-    /// cannot occur there: the proof is about the most-visited candidate, and
-    /// for a sampled answer proving that candidate cannot be overtaken proves
-    /// nothing about what comes back.
+    /// cannot occur there: the proof is about the leading candidate, and for a
+    /// sampled answer proving that candidate cannot be overtaken proves nothing
+    /// about what comes back.
     pub fn search<R: Rng + ?Sized>(
         &mut self,
         state: &G,
@@ -717,9 +770,11 @@ impl<G: Game> Searcher<G> {
         }
 
         // The mask outlives both the search and the tree, and
-        // `refresh_root_legal` caches it on arm count alone: a mask left by an
-        // earlier position with the same number of arms would pass that test.
+        // `refresh_root_legal` caches it on candidate count alone: a mask left
+        // by an earlier position with the same number of candidates would pass
+        // that test.
         scratch.root_legal.clear();
+        scratch.root_legal_complete = false;
         let target = cfg.iterations;
         let deadline = Deadline::new(cfg.time_limit_ms);
         let reused_iterations = root.visits;
@@ -754,17 +809,27 @@ impl<G: Game> Searcher<G> {
             iterations_used += 1;
 
             if cfg.early_termination && target != 0 {
-                if root_players.is_some() {
-                    refresh_root_legal(root, state, ctx, scratch, perspective);
-                }
-                if early_stop::settled::<G>(root, perspective, target, &scratch.root_legal) {
+                refresh_root_legal(root, state, ctx, scratch, root_players, perspective);
+                if early_stop::settled::<G>(
+                    root,
+                    root_players,
+                    perspective,
+                    target,
+                    &scratch.root_legal,
+                    scratch.root_legal_complete,
+                ) {
                     break StopReason::Proven;
                 }
             }
         };
 
+        // The tree holds every candidate any determinization offered, and the
+        // answer has to be one this position actually holds. One mask, built
+        // once: both extractions and the proof above rank the same set, which is
+        // the whole point of the filter.
+        refresh_root_legal(root, state, ctx, scratch, root_players, perspective);
         let (choice, best_visits, best_mean_reward) = match root_players {
-            None => match most_visited(root) {
+            None => match root_answer(root, &scratch.root_legal) {
                 Some(i) => (
                     root.children[i]
                         .edge()
@@ -774,7 +839,9 @@ impl<G: Game> Searcher<G> {
                     root.children[i].visits(),
                     root.children[i].mean_reward(),
                 ),
-                // Cancelled or timed out before a single iteration completed.
+                // Nothing legal here was ever visited: cancelled or timed out
+                // before a single iteration completed, or every world the
+                // search saw offered a different set of moves.
                 None => {
                     scratch.choices.clear();
                     state.choices_into(ctx, &mut scratch.choices);
@@ -797,18 +864,30 @@ impl<G: Game> Searcher<G> {
     }
 }
 
-/// First child with the highest visit count, or `None` if none were visited.
-/// First rather than last, so ties break deterministically.
-fn most_visited<C>(root: &Node<C>) -> Option<usize> {
-    let mut best = None;
-    let mut best_visits = 0;
-    for (i, child) in root.children().iter().enumerate() {
-        if child.visits() > best_visits {
-            best_visits = child.visits();
-            best = Some(i);
-        }
+/// The root's answer: the highest-ranked child that is legal in the real
+/// position, under the crate's one root ranking ([`crate::rank`]). First
+/// maximum, so ties break deterministically. `None` if no legal child was ever
+/// visited.
+///
+/// `legal` is parallel to `root.children`; a mask of the wrong length describes
+/// some other candidate set and admits nothing.
+fn root_answer<C>(root: &Node<C>, legal: &[bool]) -> Option<usize> {
+    if legal.len() != root.children().len() {
+        return None;
     }
-    best
+    leader_of(
+        root.children()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| legal[*i])
+            .map(|(i, child)| {
+                (
+                    i,
+                    Candidate::new(child.visits, child.availability, child.cumulative_reward),
+                )
+            }),
+    )
+    .map(|(i, _)| i)
 }
 
 /// A root decision, as much of one as `Status` carries.
@@ -965,57 +1044,114 @@ impl<C: Eq + Hash> RootCheck<C> {
     }
 }
 
-/// The perspective player's own action at a simultaneous root, with that
-/// marginal's statistics.
+/// Keep `scratch.root_legal` covering the root's candidates — a sequential
+/// root's children, or the perspective player's arms at a simultaneous one — so
+/// that both the returned move and the early-termination proof are restricted to
+/// what the player actually holds rather than to every action any
+/// determinization has offered. The mask is built against the **real** position
+/// rather than the union of the determinizations that built the tree, because a
+/// candidate the search learned about in some other world is not playable in
+/// this one.
 ///
-/// The legality mask is built against the **real** position rather than the
-/// union of the determinizations that built the tree, because an arm the search
-/// learned about in some other world is not playable in this one.
-///
-/// Never an argmax over joint successors under either policy: the perspective
-/// player's action appears in one joint child per opponent action, so an argmax
-/// there picks the best *pair* — the classic optimistic bug that makes a
-/// decoupled agent assume the opponent plays along.
-/// Keep `scratch.root_legal` covering the perspective player's arms, so the
-/// early-termination proof ranks the candidates the returned move is drawn from
-/// rather than every action any determinization has offered.
-///
-/// Arms are only ever appended *within one search*, so a length match means the
-/// candidate set has not moved and the mask still describes it. Move generation
-/// therefore runs once per arm created over the whole search, not once per
-/// iteration. Across searches the length carries no such guarantee — a new
-/// position can offer the same number of arms as the last one and a different
-/// set — which is why `search` clears the mask before its first iteration.
+/// Candidates are only ever appended *within one search*, so a length match
+/// means the candidate set has not moved and the mask still describes it. Move
+/// generation therefore runs once per candidate created over the whole search,
+/// not once per iteration. Across searches the length carries no such guarantee
+/// — a new position can offer the same number of candidates as the last one and
+/// a different set — which is why `search` clears the mask before its first
+/// iteration.
 fn refresh_root_legal<G: Game>(
     root: &Node<G::Choice>,
     state: &G,
     ctx: &G::Context,
     scratch: &mut Scratch<G>,
+    root_players: Option<PlayerSet>,
     perspective: u8,
 ) {
-    let Some(simul) = root.simul() else {
-        return;
+    // Which kind of root this is comes from the position, as every other such
+    // decision in `search` does, and never from the tree: a retained tree can
+    // carry a simultaneous block into a sequential position, and a mask built
+    // for that block's arms would be read by the extraction and the proof as a
+    // mask over children. `run_iteration` asserts the two agree; here the
+    // consequence of trusting the wrong one is a mask that describes some other
+    // candidate set entirely.
+    let slot = match root_players {
+        None => {
+            debug_assert!(
+                root.simul().is_none(),
+                "mcts: this position is sequential but the root's statistics were built \
+                 as a simultaneous node"
+            );
+            None
+        }
+        Some(players) => Some(
+            players
+                .slot_of(perspective)
+                .expect("the preamble asserted membership"),
+        ),
     };
-    let Some(slot) = simul.players.slot_of(perspective) else {
-        scratch.root_legal.clear();
-        return;
+    let arms = slot.map(|slot| {
+        let simul = root
+            .simul()
+            .expect("`search` installs the block before the first iteration");
+        (simul, slot)
+    });
+    let candidates = match arms {
+        Some((simul, slot)) => simul.slot_len(slot),
+        None => root.children().len(),
     };
-    if scratch.root_legal.len() == simul.slot_len(slot) {
+    if candidates != 0 && scratch.root_legal.len() == candidates {
         return;
     }
 
     scratch.choices.clear();
-    state.choices_for_into(ctx, perspective, &mut scratch.choices);
-    let start = simul.starts[slot] as usize;
+    match arms {
+        Some(_) => state.choices_for_into(ctx, perspective, &mut scratch.choices),
+        None => state.choices_into(ctx, &mut scratch.choices),
+    }
     scratch.root_legal.clear();
-    scratch.root_legal.resize(simul.slot_len(slot), false);
-    for choice in scratch.choices.iter() {
-        if let Some(arm) = simul.find_arm(slot, choice) {
-            scratch.root_legal[arm - start] = true;
+    scratch.root_legal.resize(candidates, false);
+    let mut found = 0;
+    match arms {
+        Some((simul, slot)) => {
+            let start = simul.starts[slot] as usize;
+            for choice in scratch.choices.iter() {
+                if let Some(arm) = simul.find_arm(slot, choice) {
+                    scratch.root_legal[arm - start] = true;
+                    found += 1;
+                }
+            }
+        }
+        None => {
+            for choice in scratch.choices.iter() {
+                if let Some(child) = root.find_child(choice) {
+                    scratch.root_legal[child] = true;
+                    found += 1;
+                }
+            }
         }
     }
+    // Every choice contributes at most one to `found`, so this is exactly "no
+    // choice went unmatched". A duplicate in the enumeration matches twice and
+    // is counted twice, which is why the test is against the enumeration's own
+    // length rather than against how many candidates the mask marks:
+    // `choices_into` promises nothing about distinctness.
+    scratch.root_legal_complete = found == scratch.choices.len();
 }
 
+/// The perspective player's own action at a simultaneous root, with that
+/// marginal's statistics.
+///
+/// Reads the mask `search` has just refreshed rather than building its own, so
+/// the answer is drawn from exactly the candidates the early-termination proof
+/// ranked. Two constructions of the same object is how the sequential root came
+/// to be extracted unfiltered while this one was not. A mask of the wrong length
+/// describes some other candidate set and admits nothing.
+///
+/// Never an argmax over joint successors under either policy: the perspective
+/// player's action appears in one joint child per opponent action, so an argmax
+/// there picks the best *pair* — the classic optimistic bug that makes a
+/// decoupled agent assume the opponent plays along.
 fn extract_marginal<G: Game, R: Rng + ?Sized>(
     root: &Node<G::Choice>,
     state: &G,
@@ -1025,23 +1161,15 @@ fn extract_marginal<G: Game, R: Rng + ?Sized>(
     cfg: &Config,
     rng: &mut R,
 ) -> (G::Choice, u32, f64) {
-    scratch.choices.clear();
-    state.choices_for_into(ctx, perspective, &mut scratch.choices);
-
     let picked = root.simul().and_then(|simul| {
         let slot = simul
             .players
             .slot_of(perspective)
             .expect("the preamble asserted membership");
-        let start = simul.starts[slot] as usize;
-        scratch.root_legal.clear();
-        scratch.root_legal.resize(simul.slot_len(slot), false);
-        for choice in scratch.choices.iter() {
-            if let Some(arm) = simul.find_arm(slot, choice) {
-                scratch.root_legal[arm - start] = true;
-            }
-        }
         let legal = &scratch.root_legal;
+        if legal.len() != simul.slot_len(slot) {
+            return None;
+        }
         match cfg.simultaneous.root_policy {
             RootPolicy::Sampled => {
                 duct::sample_root_arm(simul, slot, legal, G::SIMULTANEOUS_POLICY, rng)
@@ -1061,7 +1189,10 @@ fn extract_marginal<G: Game, R: Rng + ?Sized>(
     picked.unwrap_or_else(|| {
         // No arm legal here, or no iteration completed. Uniform over this
         // player's own list — `choices_into` may name another player's actions
-        // at an asymmetric simultaneous state.
+        // at an asymmetric simultaneous state, and a cached mask leaves
+        // `scratch.choices` describing whatever last filled it.
+        scratch.choices.clear();
+        state.choices_for_into(ctx, perspective, &mut scratch.choices);
         let k = below(rng, scratch.choices.len() as u64) as usize;
         (scratch.choices[k].clone(), 0, 0.0)
     })
@@ -1298,6 +1429,19 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                          a root choice the tree has no child for"
                     );
                 }
+            }
+            // The invariant says every root child is legal in every
+            // determinization, so this iteration is an opportunity for all of
+            // them. Skipping the count here would leave availability frozen at
+            // whatever the first pass wrote while visits went on accumulating,
+            // and the root ranking divides one by the other. The cache moves
+            // with the count it caches: `select` reads the root's own visit
+            // count rather than a root child's, so nothing would see the two
+            // disagree today, and a stale cache waiting for the first caller
+            // that does is not worth the `ln` it saves.
+            for child in node.children.iter_mut() {
+                child.availability += 1;
+                child.ln_availability = (child.availability as f64).ln();
             }
             root_avail.clear();
             root_avail.resize(node.children.len(), true);

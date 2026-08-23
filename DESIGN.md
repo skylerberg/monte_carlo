@@ -1407,6 +1407,15 @@ In `search()`, after the loop:
 
 - **Sequential root**: unchanged. `most_visited(root)` → clone the child's choice, its
   `visits()`, its `mean_reward()`; on `None`, the existing random fallback.
+  *(Superseded by the root extraction correction: the sequential root takes step 2's
+  legality mask too — built over children instead of arms, by the one helper both
+  extractions and the early-termination proof now call — and ranks the surviving
+  children by `§4.8`'s corrected rule, the best mean reward among the children that
+  cleared the evidence bar, rather than by raw visits. "Unchanged" was the bug twice
+  over: the tree holds the union of every determinization's choices, so the visit
+  leader can be a move the player does not hold, and `search` returned it; and a visit
+  argmax ranks by legality rate as much as by value. Step 4's "under `Duct` that weight
+  is the visit argmax" is superseded there for the same reason.)*
 - **Simultaneous root**:
   1. `slot = players.slot_of(perspective).unwrap()` (the preamble already asserted
      membership).
@@ -1439,11 +1448,58 @@ For arm `a` of the perspective slot, legal in the real position:
 
 ```
 RegretMatching:  w[a] = max(0, policy[a].strategy_sum) / max(1, stats[a].availability) as f64
-Duct:            w[a] = 1 if a == argmax_legal stats[.].visits else 0
+Duct:            w[a] = 1 if a == argmax_legal rank(stats[.]) else 0
 ```
 
 then normalize over the legal arms; if the total is zero, fall back to uniform over
 them.
+
+**Superseded for `Duct` (root extraction correction).** `argmax_legal stats[.].visits`
+was the shipped rule and it is the same defect this section spends three paragraphs
+describing for regret matching, in its sharpest form: `select_duct` is
+availability-corrected and had already identified the dominant arm, and the extraction
+handed back the arm that was merely legal more often (measured: arm 0 at 45 180 visits
+/ 60 000 availability / mean 0.4 returned over arm 1 at 14 820 / 14 821 / mean 0.9,
+and reported `Proven`). `rank` is now `src/rank.rs`, shared by every argmax-family
+root in the crate — the sequential root, this one, `Marginals::policy_into` and
+`RootParallel`'s merge:
+
+```
+rank:  mean reward, ties broken by visits / availability,
+       and a candidate with >= MIN_EVIDENCE selections outranks one without
+```
+
+**Not** the selection rate `visits / availability`, which was the first correction
+attempted here and is wrong for a reason no discount of the rate repairs: *the rate
+saturates at 1.0*. Selection takes an unvisited candidate on sight and then keeps
+taking it while its exploration bonus covers the gap to the leader —
+`(c / gap)^2 * ln(iterations)` selections, a budget that has nothing to do with how
+often the candidate was legal — so a candidate whose availability window is shorter
+than that budget is taken on essentially every iteration that offered it *whatever it
+is worth*, and lands against the ceiling with no room above it. Measured: a decoy
+offered one determinization in 100 reaches 97 visits / 97 availability for a rate of
+exactly 1.000, well clear of any evidence bar, against the genuinely best move at
+9 873 / 9 999 = 0.987 — and a rate-ranked root answered the decoy, worth 0.75 against
+0.90, in 16 of 16 seeds and stamped it `Proven`. The mean has no such ceiling: it is
+measured on the caller's declared reward scale and it is the quantity the root is
+choosing between, so a better candidate can always out-score a worse one on it.
+
+The bar is what keeps this from being the max-child rule robust extraction exists to
+avoid — one lucky rollout is a mean of 1.0, and the bar is what stops it winning the
+root. It leads under the bar too, because there is nothing better down there: the rate
+is manufactured for exactly the candidates that live under it. Where availability is
+uniform and the budget is large the mean argmax and the visit argmax coincide on
+anything the search has separated, so `§4.7 step 4` and the sequential fingerprint move
+only at re-rooted trees, at budgets too small for anything to clear the bar, and where
+a wide root never separated its children at all.
+
+The cost lands on `§5.1`, and it is real. A rate is built out of counts, so the
+remaining iterations bound it; a mean moves with the rewards, and bounding *those*
+needs the rewards reaching a node's accumulator to lie in a known interval.
+`Config::min_reward` and `Config::max_reward` are a declaration, not a clamp — `record`
+and `credit_marginals` add whatever the game returned — so no such bound is available
+and the crate does not pretend otherwise. `src/rank.rs` carries the derivation, the
+choice of constant, and what the rule gives up in exchange.
 
 The `/ availability` is not cosmetic. `strategy_sum` accumulates only on iterations
 where the arm was legal, so two equally good arms legal in 90% and 20% of
@@ -1479,7 +1535,20 @@ since a `Marginals` view has no position to filter against) and says so in its d
 
 - `settled` gains a `perspective: u8` parameter and a policy check. Signature:
   `settled<G: Game>(root: &Node<G::Choice>, perspective: u8, target: u32, cfg: &Config) -> bool`.
-- **Sequential root**: unchanged in every detail.
+- **Sequential root**: unchanged in every detail. *(Superseded by the root
+  extraction correction: the sequential branch now takes the same legality mask as
+  the simultaneous one, chooses between the two candidate sets on the position rather
+  than on the tree, and states its bound against `src/rank.rs`'s ranking — which is a
+  mean reward, and nothing in the counts bounds a mean. What is left of this section
+  is the evidence bar: a rival that cannot reach `MIN_EVIDENCE` selections with the
+  iterations left stays in the tier below the leader's, whatever any reward turns out
+  to be. That caps the saving at `MIN_EVIDENCE - 1` iterations no matter how large the
+  budget, and it is a no-op at any root whose rivals are all well sampled. The
+  alternative was a bound computed from `Config::max_reward`, which the crate does not
+  clamp to; a lost optimisation is cheaper than a false `Proven`. Both branches
+  additionally refuse to prove while the position offers a legal action the tree has
+  no candidate for: a candidate created with `n` iterations left can spend all of them,
+  clear the bar, and be ranked on a mean nothing in hand constrains.)*
 - **Simultaneous root under `RegretMatching`**: return `false` immediately.
   `StopReason::Proven` is unreachable there.
 - **Simultaneous root under `Duct`**: the candidate set becomes the perspective

@@ -14,7 +14,42 @@
 //! that used to stop at exactly 2048 stop later, at the visit gap the crate can
 //! actually prove, because the adversarial replay that produced 2048 was not an
 //! upper bound. No `choice` moved, and no `et=false` row moved.
-
+//!
+//! Regenerated a second time, for the root extraction fix. A root now ranks its
+//! children by **mean reward** among the children it selected at least
+//! `rank::MIN_EVIDENCE` times, with the selection rate `visits / availability`
+//! breaking ties, and a child under that bar never outranks one over it. The
+//! early-termination proof is stated against the same ranking, and a mean is not
+//! made of counts, so all that survives of it is the bar: a rival that cannot
+//! reach `MIN_EVIDENCE` selections with the iterations left can never leave the
+//! tier below the leader's.
+//!
+//! 106 of the 135 `record` rows are byte identical and 29 moved, of which only
+//! **three** changed `choice`:
+//!
+//! - Twenty-six are `et=true` rows that prove later or not at all. A surviving
+//!   proof needs every rival stuck under the bar, which needs fewer than 32
+//!   iterations left, so no row here stops more than 30 short of its budget —
+//!   where `count_to_three seed=1 iters=5000` used to stop at 2506. Three rows
+//!   lose their proof entirely and report `Budget`; `choice` is unchanged in
+//!   every one of the twenty-six, and `best_visits` and `best_mean` move only
+//!   because the search ran longer.
+//! - Three are the same `wide_two_ply40 seed=7 iters=500` search under all three
+//!   configurations, where 40 children share 500 iterations and none of them
+//!   reaches the bar. The answer moved from the child with 17 visits and a mean
+//!   of 0.0588 to the one with 16 and a mean of 0.0625 — a root wider than its
+//!   own budget answering with the best thing it measured, which is the whole
+//!   point of the rule.
+//!
+//! All 27 `reuse` rows moved, in their `second` field and — for the one search
+//! above — their `first`. The second search runs from the other player's side of
+//! `wide_two_ply(40)`, where 39 of the 40 children pay the mover exactly 1.0, so
+//! the answer is settled entirely by the rate tiebreak: a re-rooted node's
+//! children carry the availabilities progressive expansion gave them at the node
+//! that is now the root, and among equal means the child that needed fewer
+//! opportunities wins. Every moved row still reports `best_mean=1.000000000000`,
+//! so the answer changed identity, not quality.
+//!
 mod common;
 
 use std::fmt::Write as _;

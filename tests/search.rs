@@ -769,10 +769,15 @@ fn early_termination_does_not_change_the_answer() {
     assert!(stopped.root_visits <= 400);
 }
 
-/// A one-ply root whose third choice only becomes legal once `UNLOCK_AT`
-/// determinizations have been drawn — a choice the search cannot see yet, which
-/// is the ordinary shape of an information set when the card that permits a
-/// move is only sometimes in the deck's top half.
+/// A one-ply root whose third choice only appears in a determinization once
+/// `UNLOCK_AT` of them have been drawn — a choice the search cannot see yet,
+/// which is the ordinary shape of an information set when the card that permits
+/// a move is only sometimes in the deck's top half.
+///
+/// The real position holds all three throughout. It has to: the search may only
+/// answer with a move the player actually has, so a fixture whose late choice
+/// were illegal at the root would be asking for the answer to be filtered out
+/// rather than proved.
 #[derive(Clone)]
 struct LateChoice {
     drawn: std::rc::Rc<std::cell::Cell<u32>>,
@@ -787,7 +792,7 @@ impl LateChoice {
     fn new() -> Self {
         Self {
             drawn: std::rc::Rc::new(std::cell::Cell::new(0)),
-            unlocked: false,
+            unlocked: true,
             played: None,
         }
     }
@@ -859,6 +864,15 @@ impl mcts::Game for LateChoice {
 /// child `gap` behind needs `gap` iterations to draw level — and reports
 /// whether it proved at all, so a caller can tell a bound that held from one
 /// that was never tested.
+///
+/// That bound is no longer what the crate proves; it is now a *consequence* of
+/// what the crate proves, which is stricter. `settled` fires only when the
+/// leader has cleared `rank::MIN_EVIDENCE` selections and every rival is short
+/// of it by more than the iterations left, so the runner-up holds fewer than
+/// `MIN_EVIDENCE - remaining` visits and the leader at least `MIN_EVIDENCE` —
+/// which is the gap below and then some. Checking the weaker statement is
+/// deliberate: it is the one a maintainer can restate from the design without
+/// reading `rank.rs`, and any proof that breaks it is wrong under either rule.
 fn proved_early<G>(name: &str, game: &G, budget: u32, seed: u64) -> bool
 where
     G: mcts::Game<Choice = usize, Context = ()>,
@@ -899,6 +913,11 @@ where
 /// reward at once, so challengers competed with each other for a budget the
 /// question asks about one at a time, and it modelled only the children that
 /// existed when it ran.
+///
+/// The `proofs > 0` guard is load-bearing now in a way it was not: the surviving
+/// proof needs every rival locked under the evidence bar, so a fixture whose
+/// children are all well sampled proves nothing and this test would compare
+/// nothing.
 #[test]
 fn a_proof_is_never_stronger_than_the_visit_gap() {
     const BUDGET: u32 = 5_000;
@@ -952,11 +971,12 @@ fn a_spent_budget_reports_budget_not_a_proof() {
     assert_eq!(result.stop_reason, StopReason::Budget);
 }
 
-/// A child that does not exist yet is still a challenger. The conserved-visit
-/// bound covers it — a new child starts from zero, so it needs `gap`
-/// iterations like anyone else — but a simulation over the children present
-/// today cannot see it, and used to prove the answer settled on the last
-/// iteration before the real winner appeared.
+/// A child that does not exist yet is still a challenger, and nothing in the
+/// tree bounds it: created with `n` iterations left it can spend all of them,
+/// clear the evidence bar, and be ranked on a mean the counts say nothing about.
+/// A scan over the children present today cannot see it, and used to prove the
+/// answer settled on the last iteration before the real winner appeared. The
+/// `complete` flag `settled` takes is the refusal that covers this.
 #[test]
 fn a_choice_the_search_has_not_seen_yet_is_not_proven_away() {
     const BUDGET: u32 = 2_200;

@@ -24,6 +24,7 @@ use rand_core::Rng;
 
 use crate::game::{Rewards, SimultaneousPolicy};
 use crate::node::{JointKey, Simul};
+use crate::rank::{leader_of, Candidate};
 use crate::select::ucb_raw;
 use crate::util::{below, uniform_01};
 
@@ -480,10 +481,13 @@ pub(crate) fn credit_marginals<C, W: Rewards>(
 /// The design document is candid that the sleeping-bandit corrections are
 /// principled engineering rather than theorems; this is where that bites.
 ///
-/// Under [`SimultaneousPolicy::Duct`] the result is one-hot at the most-visited
-/// legal arm, deliberately: decoupled UCB1 converges to a pure policy, and its
-/// visit distribution is the object an opponent exploits, so it is not handed
-/// back dressed as a mixed strategy.
+/// Under [`SimultaneousPolicy::Duct`] the result is one-hot at [`leading_arm`],
+/// deliberately: decoupled UCB1 converges to a pure policy, and its visit
+/// distribution is the object an opponent exploits, so it is not handed back
+/// dressed as a mixed strategy. `Duct` ranks by the mean reward there rather
+/// than by the raw count, for the same reason this branch divides
+/// `strategy_sum` by availability: a count is a measurement of how often the
+/// arm was legal as much as of how good it is.
 pub(crate) fn root_strategy_into<C>(
     simul: &Simul<C>,
     slot: usize,
@@ -599,16 +603,17 @@ pub(crate) fn sample_root_arm<C, R: Rng + ?Sized>(
 /// **slot-relative** index, first maximum. `None` if the search has nothing to
 /// say about any legal arm yet.
 ///
-/// This is what [`crate::RootPolicy::MostVisited`] returns, and under
-/// [`SimultaneousPolicy::RegretMatching`] it is deliberately *not* the
-/// most-visited arm. Visits count iterations in which the exploration floor
-/// happened to land on an arm, they are not divided by availability, and both
-/// of those are corrections [`root_strategy_into`] applies for reasons that do
-/// not stop applying because the caller asked for a deterministic answer. An
-/// argmax over raw visits will hand back an arm that is strictly dominated
-/// wherever it is legal, purely because it was legal more often than its
-/// rival. Under [`SimultaneousPolicy::Duct`] the weight *is* the visit count's
-/// argmax, so this is the same answer as before.
+/// This is what [`crate::RootPolicy::MostVisited`] returns, and it is
+/// deliberately *not* the most-visited arm under either policy. Under
+/// [`SimultaneousPolicy::RegretMatching`] the weight is the conditional
+/// strategy mass [`root_strategy_into`] extracts, whose corrections do not stop
+/// applying because the caller asked for a deterministic answer. Under
+/// [`SimultaneousPolicy::Duct`] the weight is one-hot at [`leading_arm`], which
+/// ranks by mean reward for the same reason: an argmax over raw visits hands
+/// back an arm that is strictly dominated wherever it is legal, purely because
+/// it was legal more often than its rival — and under `Duct` that is the
+/// sharper failure of the two, since decoupled UCB1's *selection* is
+/// availability-corrected and had already found the dominant arm.
 ///
 /// Never an argmax over joint successors: this player's action appears in one
 /// joint child per opponent action, so the best *pair* is not the best action —
@@ -637,27 +642,28 @@ pub(crate) fn best_arm<C>(
     best
 }
 
-/// The most-visited legal arm of `slot`, first maximum, as a **slot-relative**
-/// index.
+/// The highest-ranked legal arm of `slot`, first maximum, as a **slot-relative**
+/// index, under the crate's one root ranking ([`crate::rank`]).
 ///
 /// The right answer only where the equilibrium is pure, which is why
 /// [`best_arm`] and not this is what a root move is read off. `None` if nothing
 /// legal has been selected yet.
-fn most_visited_arm<C>(simul: &Simul<C>, slot: usize, legal: &[bool]) -> Option<usize> {
+fn leading_arm<C>(simul: &Simul<C>, slot: usize, legal: &[bool]) -> Option<usize> {
     let start = simul.starts[slot] as usize;
-    let mut best = None;
-    let mut best_visits = 0;
-    for (arm, &is_legal) in legal.iter().enumerate() {
-        if !is_legal {
-            continue;
-        }
-        let visits = simul.arm_stats[start + arm].visits;
-        if visits > best_visits {
-            best_visits = visits;
-            best = Some(arm);
-        }
-    }
-    best
+    leader_of(
+        legal
+            .iter()
+            .enumerate()
+            .filter(|(_, &is_legal)| is_legal)
+            .map(|(arm, _)| {
+                let stats = &simul.arm_stats[start + arm];
+                (
+                    arm,
+                    Candidate::new(stats.visits, stats.availability, stats.cumulative_reward),
+                )
+            }),
+    )
+    .map(|(arm, _)| arm)
 }
 
 /// The arm `Duct` puts all of its root mass on, or `None` under a policy that
@@ -670,7 +676,7 @@ fn duct_target<C>(
     policy: SimultaneousPolicy,
 ) -> Option<usize> {
     match policy {
-        SimultaneousPolicy::Duct => most_visited_arm(simul, slot, legal),
+        SimultaneousPolicy::Duct => leading_arm(simul, slot, legal),
         SimultaneousPolicy::RegretMatching => None,
     }
 }
@@ -1004,33 +1010,66 @@ mod tests {
         }
     }
 
-    /// `RootPolicy::MostVisited` under regret matching must not be an argmax
-    /// over raw visits.
+    /// `RootPolicy::MostVisited` must not be an argmax over raw visits, under
+    /// either policy.
     ///
     /// Arm 0 was legal on every iteration and played on a fifth of them; arm 1
-    /// was legal on a fifth of the iterations and played on nearly all of those.
-    /// Their visit counts are almost equal, and only arm 1's conditional
-    /// strategy mass says it is the move.
+    /// was legal on a fifth of the iterations and played on nearly all of those,
+    /// and paid 0.9 against arm 0's 0.4 wherever it was dealt. Their visit
+    /// counts are almost equal, so raw visits answer arm 0 — and arm 1 is the
+    /// move on both readings: regret matching's conditional strategy mass, and
+    /// the mean reward `Duct` ranks by.
+    ///
+    /// Arm 2 is the other half of the reading. `select_duct` takes an unvisited
+    /// legal arm on sight, so an arm dealt three times holds a perfect mean
+    /// having proved nothing: under `Duct` it must not outrank either arm the
+    /// search actually measured. Regret matching ranks the same arm by the
+    /// strategy mass it accumulated over those three iterations and answers it,
+    /// which is the per-arm conditional's known limit (DESIGN.md §4.8) and not
+    /// something this ranking reaches.
     #[test]
-    fn the_deterministic_root_move_divides_out_availability() {
+    fn the_deterministic_root_move_is_not_the_visit_argmax() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1], true, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1, 2], true, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         simul.arm_policy[0].strategy_sum = 200.0;
         simul.arm_stats[0].availability = 1_000;
         simul.arm_stats[0].visits = 200;
+        simul.arm_stats[0].cumulative_reward = 80.0;
         simul.arm_policy[1].strategy_sum = 190.0;
         simul.arm_stats[1].availability = 200;
         simul.arm_stats[1].visits = 190;
+        simul.arm_stats[1].cumulative_reward = 171.0;
+        simul.arm_policy[2].strategy_sum = 3.0;
+        simul.arm_stats[2].availability = 3;
+        simul.arm_stats[2].visits = 3;
+        simul.arm_stats[2].cumulative_reward = 3.0;
 
-        assert_eq!(most_visited_arm(simul, 0, &[true, true]), Some(0));
-        assert_eq!(best_arm(simul, 0, &[true, true], RM), Some(1));
+        let all = [true, true, true];
+        let measured = [true, true, false];
+        assert_eq!(raw_visit_argmax(simul, 0, &all), Some(0));
+        assert_eq!(leading_arm(simul, 0, &all), Some(1));
+        assert_eq!(best_arm(simul, 0, &all, DUCT), Some(1));
+        assert_eq!(best_arm(simul, 0, &measured, RM), Some(1));
         // Restricted to the arm that is actually legal here, either answers it.
-        assert_eq!(best_arm(simul, 0, &[true, false], RM), Some(0));
-        assert_eq!(best_arm(simul, 0, &[false, false], RM), None);
+        assert_eq!(best_arm(simul, 0, &[true, false, false], RM), Some(0));
+        assert_eq!(best_arm(simul, 0, &[true, false, false], DUCT), Some(0));
+        assert_eq!(best_arm(simul, 0, &[false, false, false], RM), None);
+    }
 
-        // Under `Duct` the weight is the visit argmax, so nothing changes.
-        assert_eq!(best_arm(simul, 0, &[true, true], DUCT), Some(0));
+    /// The rule this crate deliberately does not use, kept so that the test
+    /// above can say what the corrected answer is corrected *away from*.
+    fn raw_visit_argmax<C>(simul: &Simul<C>, slot: usize, legal: &[bool]) -> Option<usize> {
+        let start = simul.starts[slot] as usize;
+        let mut best = None;
+        let mut best_visits = 0;
+        for (arm, &is_legal) in legal.iter().enumerate() {
+            if is_legal && simul.arm_stats[start + arm].visits > best_visits {
+                best_visits = simul.arm_stats[start + arm].visits;
+                best = Some(arm);
+            }
+        }
+        best
     }
 
     /// The reservoir draws in `select_duct` are only uniform if `below` is: the
@@ -1252,10 +1291,10 @@ mod tests {
             "{strategy:?}"
         );
 
-        // Duct puts everything on the most-visited arm it is allowed to have.
+        // Duct puts everything on the highest-ranked arm it is allowed to have.
         root_strategy_into(simul, 0, &[true, true, true], DUCT, &mut strategy);
         let visits: Vec<u32> = (0..3).map(|a| simul.arm_stats[a].visits).collect();
-        let best = most_visited_arm(simul, 0, &[true, true, true]).unwrap();
+        let best = leading_arm(simul, 0, &[true, true, true]).unwrap();
         assert_eq!(
             strategy.iter().filter(|&&p| p > 0.0).count(),
             1,
