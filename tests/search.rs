@@ -1,6 +1,6 @@
 mod common;
 
-use common::{AlwaysWin, CountToThree, GameTree, TreeNode};
+use common::{AlwaysWin, CountToThree, GameTree, PriorTrap, TreeNode};
 use mcts::rand_core::SeedableRng;
 use mcts::{Config, Node, Searcher, StopReason};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1269,4 +1269,156 @@ fn a_degenerate_node_scores_inside_the_declared_reward_range() {
 fn a_degenerate_sequential_node_is_a_debug_assertion() {
     let game = DeadEnd::default();
     Searcher::new(&game).search(&game, &(), 0, &dead_end_config(), None, &mut rng(3));
+}
+
+/// A prior is a statement about the *mover's* prospects, and the search adds it
+/// to a mean it keeps in the mover's currency.
+///
+/// [`common::PriorTrap`]'s hook returns the successor's game-theoretic value to
+/// the player who moved into it. Evaluated for the searching player instead —
+/// which is what the crate used to pass — player 1's node is told that the
+/// terminal paying player 1 nothing is the good one, player 1 obliges, and the
+/// trap's mean climbs toward the 1.0 it would pay player 0 if the opponent
+/// cooperated. This is the optimistic-opponent error the crate refuses to make
+/// at a simultaneous root, made silently at every sequential opponent node.
+#[test]
+fn the_prior_is_read_in_the_movers_currency() {
+    const BUDGET: u32 = 500;
+
+    for seed in 1..=16u64 {
+        let game = PriorTrap::new();
+        let cfg = Config {
+            iterations: BUDGET,
+            progressive_bias_weight: 100.0,
+            ..config(BUDGET)
+        };
+        let mut searcher = Searcher::new(&game);
+        let result = searcher.search(&game, &(), 0, &cfg, None, &mut rng(seed));
+
+        assert_eq!(
+            result.choice,
+            PriorTrap::SAFE,
+            "seed {seed} walked into the trap, which player 1 punishes for 0.0 \
+             against SAFE's 0.3"
+        );
+
+        let trap = searcher
+            .tree()
+            .expect("a search leaves a tree")
+            .children()
+            .iter()
+            .find(|child| child.edge().choice() == Some(&PriorTrap::TRAP))
+            .expect("the trap is a root child");
+        let visits = |choice: usize| {
+            trap.children()
+                .iter()
+                .find(|child| child.edge().choice() == Some(&choice))
+                .map_or(0, |child| child.visits())
+        };
+        assert!(
+            visits(1) > visits(0),
+            "seed {seed}: player 1 spent {} visits on the reply paying them 0.0 and \
+             {} on the reply paying them 1.0",
+            visits(0),
+            visits(1)
+        );
+    }
+}
+
+/// The progressive-bias term has to be observable, or nothing here is a test.
+///
+/// It was not: no fixture in the repo overrode `Game::heuristic_bias`, so
+/// deleting the third term of `ucb_raw` outright left the whole suite green,
+/// golden included. An honest prior valuing the trap at 0.0 and the safe move
+/// at 0.3 must spend less of the budget on the trap than the same search with
+/// the weight at zero — the same search in every other respect, down to the rng
+/// draws, since evaluating the prior consumes none.
+#[test]
+fn a_non_zero_bias_weight_moves_the_search() {
+    const BUDGET: u32 = 500;
+
+    let trap_visits = |weight: f64| {
+        let game = PriorTrap::new();
+        let cfg = Config {
+            iterations: BUDGET,
+            progressive_bias_weight: weight,
+            ..config(BUDGET)
+        };
+        let mut searcher = Searcher::new(&game);
+        searcher.search(&game, &(), 0, &cfg, None, &mut rng(1));
+        searcher
+            .tree()
+            .expect("a search leaves a tree")
+            .children()
+            .iter()
+            .find(|child| child.edge().choice() == Some(&PriorTrap::TRAP))
+            .expect("the trap is a root child")
+            .visits()
+    };
+
+    let unbiased = trap_visits(0.0);
+    let biased = trap_visits(100.0);
+    assert!(
+        biased < unbiased,
+        "the prior changed nothing: the trap took {biased} of {BUDGET} iterations \
+         with the weight at 100 and {unbiased} with it at zero"
+    );
+}
+
+/// A non-finite knob does not mis-tune the search, it switches it off: every
+/// UCB value becomes NaN, NaN loses every comparison `select` makes, so `select`
+/// answers `None` at the first fully-opened node and the rest of the budget
+/// grows nothing. Measured before the refusal: 2 000 iterations on
+/// `minimal_trap` left a three-node tree and returned the losing choice.
+///
+/// `Config` derives `serde` and TOML, YAML and JSON-with-a-divide all spell
+/// `nan` and `inf`, so this arrives without anyone typing `f64::NAN`.
+#[test]
+#[should_panic(expected = "Config::exploration_constant is NaN")]
+fn a_non_finite_exploration_constant_is_refused() {
+    let game = GameTree::minimal_trap();
+    let cfg = Config {
+        exploration_constant: f64::NAN,
+        ..config(2000)
+    };
+    Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
+}
+
+/// `NaN * 0.0` is `NaN`, so the bias weight reaches every child's score even in
+/// a game that never implements the hook.
+#[test]
+#[should_panic(expected = "Config::progressive_bias_weight is inf")]
+fn a_non_finite_bias_weight_is_refused() {
+    let game = GameTree::minimal_trap();
+    let cfg = Config {
+        progressive_bias_weight: f64::INFINITY,
+        ..config(2000)
+    };
+    Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
+}
+
+/// A NaN bound is caught as a non-finite knob rather than as an empty range:
+/// the range check is `max_reward <= min_reward`, and every comparison against
+/// a NaN is false, so an empty-range test alone would let this through.
+#[test]
+#[should_panic(expected = "Config::min_reward is NaN")]
+fn a_non_finite_reward_bound_is_refused() {
+    let game = GameTree::minimal_trap();
+    let cfg = Config {
+        min_reward: f64::NAN,
+        ..config(2000)
+    };
+    Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
+}
+
+/// The simultaneous knobs go through the same gate. `duct_exploration` is dead
+/// at a sequential node, but a config is refused for what it declares, not for
+/// what this position happens to read.
+#[test]
+#[should_panic(expected = "Config::simultaneous.duct_exploration is -inf")]
+fn a_non_finite_simultaneous_knob_is_refused() {
+    let game = GameTree::minimal_trap();
+    let mut cfg = config(2000);
+    cfg.simultaneous.duct_exploration = f64::NEG_INFINITY;
+    Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
 }

@@ -83,6 +83,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+* **The progressive-bias prior is read in the mover's currency, not the
+  searching player's.** `Game::heuristic_bias` was evaluated for `perspective`
+  and then added to a child whose mean the crate keeps in the currency of the
+  player who moved into it, so at every opponent node the prior was pointed at
+  the reply that pays *you* — the optimistic-opponent error the crate refuses to
+  make at a simultaneous root, made silently at a sequential one. Measured on a
+  two-ply game where player 1's reply is worth 1.0 to whoever it is chosen for:
+  at weight 100 and 500 iterations, player 1's node spent 102 of its 246 visits
+  helping player 0 and the search returned the losing move on all 16 seeds. Read
+  for the mover, the same search spends 1 visit there and answers correctly on
+  all 16. The hook's second parameter is renamed `mover` and documented as being
+  on the same scale as `Rewards::reward(mover)`. A game that leaves
+  `progressive_bias_weight` at its default of `0.0` never evaluates the prior and
+  sees no change, and neither does one that ignored the argument and derived the
+  player from its own state — an escape hatch that fails at a terminal successor,
+  which names nobody, and in a game where one player moves twice.
+* **A non-finite `Config` knob is refused instead of silently switching the
+  search off.** A NaN or infinite `exploration_constant`, `progressive_bias_weight`,
+  reward bound or simultaneous exploration constant makes every UCB value NaN,
+  and NaN loses every comparison `select` makes — so `select` answered `None` at
+  the first fully-opened node and every remaining iteration bumped the root's
+  visit count and grew nothing. A 2 000-iteration search on the trap fixture
+  returned the losing choice off a three-node tree. `Config` derives `serde`, and
+  TOML, YAML and JSON-with-a-divide all spell `nan` and `inf`, so this arrives
+  without anyone typing `f64::NAN`. It now takes the same path as an empty
+  reward range: refused by `Searcher::search` and by `RootParallel::search`,
+  which disarms every worker's retained tree before it refuses.
 * **The sequential root's answer is filtered against the real position.** The
   tree accumulates every choice any determinization offered, and `search` used
   to return that union's leader — so under determinization, or after

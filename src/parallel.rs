@@ -88,11 +88,11 @@ where
     /// # Panics
     ///
     /// On everything [`Searcher::search`] panics on, including a `cfg` no
-    /// search can honour: no budget at all, or an empty or inverted reward
-    /// range. A config is refused on this thread rather than by eight workers
-    /// at once, and every worker's retained tree is disarmed first, so a
-    /// refused search leaves the pool exactly as a completed one does: holding
-    /// trees no later search will reuse.
+    /// search can honour: no budget at all, a non-finite knob, or an empty or
+    /// inverted reward range. A config is refused on this thread rather than by
+    /// eight workers at once, and every worker's retained tree is disarmed
+    /// first, so a refused search leaves the pool exactly as a completed one
+    /// does: holding trees no later search will reuse.
     pub fn search(
         &mut self,
         state: &G,

@@ -69,8 +69,13 @@ pub struct Config {
     pub time_limit_ms: Option<u64>,
     /// UCB1 exploration constant. Tune it against your reward scale.
     pub exploration_constant: f64,
-    /// Weight on `Game::heuristic_bias`. Zero disables progressive bias, and
+    /// Weight on [`Game::heuristic_bias`]. Zero disables progressive bias, and
     /// skips evaluating the prior entirely.
+    ///
+    /// The prior is added to the child's own mean, which the crate keeps in the
+    /// currency of the player who moved into that child — so the hook is asked
+    /// for the *mover's* valuation of the successor, not the searching player's.
+    /// A prior on the wrong player's scale is worse than none at all.
     ///
     /// No effect at a simultaneous node, where the prior is never evaluated:
     /// `heuristic_bias` describes a state, so at a simultaneous node it
@@ -225,6 +230,15 @@ impl Config {
     /// disable its range assertion in exactly that case, so nothing reported
     /// it. There is no reading of `min_reward >= max_reward` worth guessing at,
     /// so it is refused here.
+    ///
+    /// A non-finite knob is refused for a different reason: it does not
+    /// mis-tune the search, it switches the search off. `ucb_raw` returns NaN
+    /// for every child, `select`'s `value > best_value` is false against any
+    /// incumbent, so `select` answers `None` at a fully-opened node and every
+    /// remaining iteration bumps the root's visit count and nothing else. A
+    /// 2 000-iteration search returned the losing move off a three-node tree.
+    /// `Config` derives `serde` and TOML, YAML and JSON-with-a-divide all spell
+    /// `nan` and `inf`, so this is reachable without anyone typing `f64::NAN`.
     pub(crate) fn validate(&self) {
         if let Some(refusal) = self.refusal() {
             panic!("{refusal}");
@@ -242,6 +256,33 @@ impl Config {
     pub(crate) fn refusal(&self) -> Option<String> {
         if self.iterations == 0 && self.time_limit_ms.is_none() {
             return Some("mcts: Config has neither an iteration nor a time budget".into());
+        }
+        // Ahead of the range check, which compares with `<=` and is therefore
+        // false in both directions for a NaN bound.
+        for (name, value) in [
+            ("exploration_constant", self.exploration_constant),
+            ("progressive_bias_weight", self.progressive_bias_weight),
+            ("min_reward", self.min_reward),
+            ("max_reward", self.max_reward),
+            (
+                "simultaneous.duct_exploration",
+                self.simultaneous.duct_exploration,
+            ),
+            (
+                "simultaneous.regret_matching_exploration",
+                self.simultaneous.regret_matching_exploration,
+            ),
+        ] {
+            if !value.is_finite() {
+                return Some(format!(
+                    "mcts: Config::{name} is {value}, which is not a finite number. It does \
+                     not mis-tune the search, it switches the bandit off: a NaN loses every \
+                     comparison, so the descent stops at the first fully-opened node and the \
+                     rest of the budget grows nothing, while an infinity ties every child, so \
+                     the first one wins every selection and the answer is whichever choice was \
+                     enumerated first.",
+                ));
+            }
         }
         if self.max_reward <= self.min_reward {
             return Some(format!(
@@ -710,8 +751,9 @@ impl<G: Game> Searcher<G> {
     /// visited root choice.
     ///
     /// Panics if `state` is terminal, has no legal choices, if the config
-    /// specifies neither an iteration nor a time budget, or if it declares an
-    /// empty reward range.
+    /// specifies neither an iteration nor a time budget, if any of its
+    /// floating-point knobs is non-finite, or if it declares an empty reward
+    /// range.
     ///
     /// [`Game::advance`] is called on each determinization of `state` and must
     /// not fast-forward past the decision being searched — the answer list and
@@ -1578,7 +1620,12 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
 
         if node.children[i].visits() == 0 {
             if cfg.progressive_bias_weight != 0.0 {
-                node.children[i].heuristic_bias = state.heuristic_bias(ctx, perspective);
+                // `player`, not `perspective`: `ucb_raw` adds this term to the
+                // child's own mean, and backup stamps that mean with
+                // `rewards.reward(node.player)` — the mover at this node. A
+                // prior read on the perspective player's scale is the
+                // optimistic-opponent error, inverted at every opponent node.
+                node.children[i].heuristic_bias = state.heuristic_bias(ctx, player);
             }
             rewards = state.rollout(ctx, rng);
             break;

@@ -50,6 +50,29 @@
 //! opportunities wins. Every moved row still reports `best_mean=1.000000000000`,
 //! so the answer changed identity, not quality.
 //!
+//! Regenerated a third time, to make the `pb=0.75` third of this file mean
+//! something. No fixture in the repo overrode `Game::heuristic_bias`, so every
+//! `pb=0.75` row was a byte-for-byte re-run of its `pb=0.0` twin and deleting
+//! the progressive-bias term from `ucb_raw` left the whole suite green.
+//! `GameTree` now returns a real prior — the share of a state's immediate
+//! successors that the mover outright wins — so 14 of the 162 blocks moved,
+//! every one of them a `pb=0.75` block, and none of the `pb=0.0` ones at any
+//! seed or budget. Nine are `trap`, where the prior on a losing line delays the
+//! revisit that UCB1's exploration term would otherwise schedule; the other
+//! five are `wide_two_ply40 seed=21` and the `reuse` rows that share its search,
+//! where 39 of 40 successors pay the mover 1.0 so the prior is near-uniform and
+//! only breaks ties. One `choice` moved, `wide_two_ply40 seed=21 iters=50`, from
+//! the child with 4 visits and a mean of 0.25 to the one with 3 and a mean of
+//! 0.333 — 40 children sharing 50 iterations, decided in the tier below the
+//! evidence bar.
+//!
+//! What moved is the prior's *presence*, not the fix that ships with it: this
+//! file is insensitive to which player the prior is read for, because on these
+//! fixtures the mover's prior always lands on the child that already leads.
+//! `the_prior_is_read_in_the_movers_currency` in `tests/search.rs` is what pins
+//! that.
+//!
+#[allow(dead_code)]
 mod common;
 
 use std::fmt::Write as _;

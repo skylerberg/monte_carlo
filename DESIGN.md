@@ -446,11 +446,14 @@ pub trait Game: Sized {
     /// Prior for progressive bias, evaluated once when a child is first visited.
     /// Only called when `Config::progressive_bias_weight` is non-zero.
     ///
+    /// `self` is the successor state and `mover` is the player who chose the move that
+    /// reached it. Return a number on the same scale as `Rewards::reward(mover)`.
+    ///
     /// Never called at a simultaneous node. The prior is evaluated at the *successor*
     /// state, so it can only ever describe a joint child — and selection at a
     /// simultaneous node scores each player's own marginals, not the joint children.
     /// `Config::progressive_bias_weight` therefore has no effect there.
-    fn heuristic_bias(&self, _ctx: &Self::Context, _perspective: u8) -> f32 { 0.0 }
+    fn heuristic_bias(&self, _ctx: &Self::Context, _mover: u8) -> f32 { 0.0 }
 }
 ```
 
@@ -1642,6 +1645,16 @@ Rewritten. `merge` becomes `fn merge(&mut self, perspective: u8, cfg: &Config, r
 
 ### 5.5 Progressive bias and `heuristic_bias`
 
+`heuristic_bias` is asked for the **mover's** valuation of the successor, not the
+searching player's: `ucb_raw` adds the prior to the child's own mean, and max^n backup
+keeps that mean in the currency of the player who moved into the child. Read on the
+perspective player's scale it is negated at every opponent node — the same
+optimistic-opponent error the crate refuses to make at a simultaneous root, made
+silently at a sequential one — so the descent argument passes `player` from
+`Status::Active { player }` and the hook's parameter is named `mover`. The player
+cannot be recovered from the successor state: `Status::Terminal` names nobody, and a
+game where one player moves twice has no turn order to read it off.
+
 `heuristic_bias` is **never called at a simultaneous node**, and
 `Config::progressive_bias_weight` has no effect there. The prior is evaluated at the
 successor state, so it can only describe a joint child, and selection scores arms.
@@ -1800,21 +1813,38 @@ debug_assert!(
 on `RootParallel::search`'s own thread before any worker is spawned:
 
 ```
-assert!(
-    cfg.iterations != 0 || cfg.time_limit_ms.is_some(),
-    "mcts: Config has neither an iteration nor a time budget"
-);
-assert!(
-    cfg.max_reward > cfg.min_reward,
-    "mcts: Config declares the reward range [{}, {}], which is empty. Set both bounds \
-     to your game's actual payoff range: regret matching cannot tell one payoff from \
-     another inside an empty range, and decoupled UCB1 measures its tie tolerance \
-     against the width of it.",
-    cfg.min_reward, cfg.max_reward
-);
+if cfg.iterations == 0 && cfg.time_limit_ms.is_none() {
+    return Some("mcts: Config has neither an iteration nor a time budget");
+}
+for (name, value) in [
+    ("exploration_constant", cfg.exploration_constant),
+    ("progressive_bias_weight", cfg.progressive_bias_weight),
+    ("min_reward", cfg.min_reward),
+    ("max_reward", cfg.max_reward),
+    ("simultaneous.duct_exploration", cfg.simultaneous.duct_exploration),
+    ("simultaneous.regret_matching_exploration", cfg.simultaneous.regret_matching_exploration),
+] {
+    if !value.is_finite() {
+        return Some(format!(
+            "mcts: Config::{name} is {value}, which is not a finite number. Every \
+             selection value it reaches becomes NaN, and NaN loses every comparison \
+             the bandit makes — the descent stops at the first fully-opened node and \
+             the rest of the budget grows nothing.",
+        ));
+    }
+}
+if cfg.max_reward <= cfg.min_reward {
+    return Some(format!(
+        "mcts: Config declares the reward range [{}, {}], which is empty. Set both bounds \
+         to your game's actual payoff range: regret matching cannot tell one payoff from \
+         another inside an empty range, and decoupled UCB1 measures its tie tolerance \
+         against the width of it.",
+        cfg.min_reward, cfg.max_reward
+    ));
+}
 ```
 
-Hard `assert!`s, not debug assertions: an empty or inverted range is a
+A hard panic, not a debug assertion: an empty or inverted range is a
 configuration no search can honour under either policy, and it is silent in
 release. Both callers raise the same refusal — one `Config::refusal()` returning
 the message, so the pool can act before it panics. `normalize_reward` divides by the span, so regret matching is handed a
@@ -1823,6 +1853,19 @@ regrets, measured at roughly twice the exploitability of playing uniformly at
 random — and `Duct`'s tie tolerance is a fraction of the same span, so a zero one
 leaves the tie pool decided by nothing. Both bounds are checked, because an
 inverted range takes the same branch as an empty one.
+
+The non-finite check ahead of it covers all six f64 knobs —
+`exploration_constant`, `progressive_bias_weight`, `min_reward`, `max_reward`,
+`simultaneous.duct_exploration` and `simultaneous.regret_matching_exploration`.
+It is refused rather than tolerated because a non-finite knob does not mis-tune
+the search, it switches the search off: every selection value it reaches is NaN,
+NaN loses every comparison `select` makes, so `select` answers `None` at a
+fully-opened node and the rest of the budget bumps the root's visit count and
+grows nothing. `Config` derives `serde`, and TOML, YAML and JSON-with-a-divide
+all spell `nan` and `inf`, so it is reachable without anyone typing `f64::NAN`.
+It has to precede the range check rather than follow it: `max_reward <=
+min_reward` is false in both directions for a NaN bound, so the range check
+alone would let it through.
 
 `RootParallel::search` raises it on its own thread rather than as N workers
 panicking at once, and **disarms every worker's retained tree first**.
