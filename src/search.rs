@@ -1409,7 +1409,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                             }
                         }
                     }
-                    node.restamp_marginals();
+                    node.restamp_marginals(policy);
                 } else {
                     // Only a pass that found every arm legal has *proved* the
                     // tree's action set equals this position's. A root promoted
@@ -1421,12 +1421,8 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                         let p = players.player_at(slot).expect("a slot has a participant");
                         choices.clear();
                         state.choices_for_into(ctx, p, choices);
-                        let legal = node.expand_marginals(
-                            slot,
-                            choices,
-                            policy.mixes(),
-                            G::CHILD_INDEX_THRESHOLD,
-                        );
+                        let legal =
+                            node.expand_marginals(slot, choices, policy, G::CHILD_INDEX_THRESHOLD);
                         debug_assert!(
                             legal != 0,
                             "mcts: player {p} has no legal action at a simultaneous node, so \
@@ -1549,14 +1545,15 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
             // determinization, so this iteration is an opportunity for all of
             // them. Skipping the count here would leave availability frozen at
             // whatever the first pass wrote while visits went on accumulating,
-            // and the root ranking divides one by the other. The cache moves
-            // with the count it caches: `select` reads the root's own visit
-            // count rather than a root child's, so nothing would see the two
-            // disagree today, and a stale cache waiting for the first caller
-            // that does is not worth the `ln` it saves.
+            // and the root ranking divides one by the other. `ln_availability`
+            // is deliberately *not* kept with it, exactly as `Node::expand`
+            // leaves it at a root: `select` scores a root's children against
+            // the root's own visit count, and `reroot_at` resets the field on
+            // promotion, so this path would pay a libm call per child per
+            // iteration — the widest loop in the search — for a denominator
+            // with no reader.
             for child in node.children.iter_mut() {
                 child.availability += 1;
-                child.ln_availability = (child.availability as f64).ln();
             }
             root_avail.clear();
             root_avail.resize(node.children.len(), true);
@@ -2084,6 +2081,85 @@ mod tests {
             }
             let selected: u32 = (0..marginals.len()).map(|a| marginals.visits(a)).sum();
             assert_eq!(selected, result.root_visits);
+        }
+    }
+
+    /// The sequential half of the fast path. `select` scores a root's children
+    /// against the root's own visit count, so the loop that stands in for
+    /// enumeration must keep the availability count — the root ranking divides
+    /// by it — and must not pay a libm call per child per iteration for a
+    /// denominator with no reader.
+    #[test]
+    fn an_invariant_root_counts_availability_without_caching_its_logarithm() {
+        /// A sequential root whose four choices are legal in every
+        /// determinization, so the fast path takes over from iteration 2.
+        #[derive(Clone, Default)]
+        struct FixedRoot {
+            picked: Option<u8>,
+        }
+
+        impl Game for FixedRoot {
+            type Choice = u8;
+            type Rewards = [f64; 2];
+            type Context = ();
+            type Side = ();
+
+            const ROOT_CHOICES_INVARIANT: bool = true;
+
+            fn status(&self, _ctx: &()) -> Status<[f64; 2]> {
+                match self.picked {
+                    Some(picked) => {
+                        let payoff = f64::from(picked) / 3.0;
+                        Status::Terminal([payoff, 1.0 - payoff])
+                    }
+                    None => Status::Active { player: 0 },
+                }
+            }
+
+            fn choices_into(&self, _ctx: &(), out: &mut Vec<u8>) {
+                out.extend(0..4);
+            }
+
+            fn apply_choice<R: Rng + ?Sized>(&mut self, _ctx: &(), choice: &u8, _rng: &mut R) {
+                self.picked = Some(*choice);
+            }
+
+            fn rollout<R: Rng + ?Sized>(&mut self, _ctx: &(), rng: &mut R) -> [f64; 2] {
+                let picked = *self.picked.get_or_insert(below(rng, 4) as u8);
+                let payoff = f64::from(picked) / 3.0;
+                [payoff, 1.0 - payoff]
+            }
+
+            fn new_buffer(&self) -> Self {
+                Self::default()
+            }
+
+            fn determinize_into<R: Rng + ?Sized>(
+                &self,
+                dest: &mut Self,
+                _ctx: &(),
+                _perspective: u8,
+                _rng: &mut R,
+            ) {
+                dest.clone_from(self);
+            }
+        }
+
+        let game = FixedRoot::default();
+        let mut searcher = Searcher::new(&game);
+        let result = searcher.search(&game, &(), 0, &config(500), None, &mut rng(3));
+
+        let root = searcher.tree().expect("a search leaves a tree");
+        assert_eq!(root.children().len(), 4);
+        for child in root.children() {
+            assert_eq!(
+                child.availability, result.root_visits,
+                "every root child is legal in every determinization"
+            );
+            assert_eq!(
+                child.ln_availability, 0.0,
+                "a root child's exploration denominator has no reader"
+            );
         }
     }
 

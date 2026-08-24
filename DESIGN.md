@@ -749,6 +749,15 @@ impl<G: Game> Searcher<G> {
 
 ### 2.4 `src/parallel.rs`
 
+The pool holds `Vec<Worker<G, R>>`, where `Worker` is a `#[repr(align(128))]` struct of
+one `Searcher` and one `Rng`. Packed as a bare tuple the stride is 296 bytes, so three
+of four workers straddled a cache line with their neighbour — one worker's inline root
+node and rng against the next worker's `Vec` headers, both written every iteration by a
+different thread. That is false sharing in the one structure whose whole premise is that
+workers share nothing. `repr(align)` rounds the size up as well as the base, so the
+separation is a property of the type rather than of where the allocator happened to land
+the `Vec`; the stride becomes 384 bytes, 88 of them padding per worker.
+
 ```rust
 impl<G, R> RootParallel<G, R> where /* unchanged bounds */ {
     // new, threads, trees, clear_trees, reuse_subtree, search: signatures unchanged
@@ -789,7 +798,10 @@ not estimated. Reproduce with a `size_of` harness before trusting them elsewhere
 ```rust
 pub struct Node<C> {
     pub(crate) cumulative_reward: f64,
-    /// Cached `ln(availability)`, refreshed only when `availability` changes.
+    /// Cached `ln(availability)`, refreshed only when `availability` changes, and
+    /// only at a non-root parent: `select` scores a root's children against the
+    /// root's own visit count, so a root child's copy has no reader, and `reroot_at`
+    /// resets the field on the one promotion that could give it one.
     pub(crate) ln_availability: f64,
     pub(crate) children: Vec<Node<C>>,
     /// Was `index: Option<Box<ChildIndex>>`. Same slot, same eight bytes: the hash
@@ -866,10 +878,12 @@ pub(crate) struct Simul<C> {
     /// array — 8 candidates per cache line at any arity — instead of striding 64 to
     /// 88 bytes into `children` to reach a field.
     pub(crate) joint_keys: Vec<JointKey>,     // 24
-    /// One index over *all* arms, hashed on `(slot, choice)`, built once the total
-    /// arm count passes `Game::CHILD_INDEX_THRESHOLD`. One index rather than one per
-    /// participant, because arms live in one flat array and a slot-tagged hash
-    /// distinguishes them for free.
+    /// One index over *all* arms, hashed on `(slot, choice)` and holding an `ArmRef`
+    /// — slot plus slot-relative position — built once the total arm count passes
+    /// `Game::CHILD_INDEX_THRESHOLD`. One index rather than one per participant,
+    /// because arms live in one flat array and a slot-tagged hash distinguishes them
+    /// for free; the payload is slot-relative so that `grow_slot` can insert into it
+    /// rather than throw it away (§4.2).
     pub(crate) arm_index: Option<ChildIndex>, // 32
     pub(crate) joint_index: Option<ChildIndex>, // 32
     pub(crate) players: PlayerSet,            // 8
@@ -895,6 +909,8 @@ pub(crate) struct ArmStats {
     /// `Marginals::mean_reward` and `Duct` read a real reward.
     pub(crate) cumulative_reward: f64,   // 8
     /// Cached `ln(availability)`, the arm's ISMCTS exploration denominator.
+    /// Maintained under `Duct` alone, its only reader; the field stays either way,
+    /// because dropping it would take `ArmStats` off its 32-byte stride.
     pub(crate) ln_availability: f64,     // 8
     pub(crate) visits: u32,              // 4
     /// Iterations at this node in which this action was legal for this player.
@@ -1134,13 +1150,17 @@ Per visit, for each slot `s` in `0..k`:
 2. For each enumerated choice `c`:
    - `find_arm(s, c)`:
      - below the index threshold, linear scan of `arm_choices[starts[s]..starts[s+1]]`;
-     - at or above it, `hash_of(&(s as u32, c))` into `arm_index`, with a closure that
-       compares both the slot (recovered from the global arm position against
-       `starts`) and the choice.
+     - at or above it, `hash_of(&(s as u32, c))` into `arm_index`, whose payload is an
+       `ArmRef` — three bits of slot and 29 of slot-relative position — so the closure
+       compares the slot without touching `starts`, and resolves the choice through
+       `starts[slot] + relative`.
    - **Hit, already stamped this iteration** (`arm_stats[a].avail_epoch == t`):
      a duplicate within the enumeration; do nothing.
-   - **Hit, not yet stamped**: `availability += 1`;
-     `ln_availability = (availability as f64).ln()`; `avail_epoch = t`.
+   - **Hit, not yet stamped**: `availability += 1`; `avail_epoch = t`; and under
+     `Duct` only, `ln_availability = (availability as f64).ln()`. Nothing else reads
+     that logarithm, and it is a libm call per arm per visit — `sum(|A_i|)` of them
+     per simultaneous node on the descent — on a loop whose other work is a handful
+     of integer instructions.
    - **Miss**: create the arm with `grow_slot(s, c)`, below.
    - After creating: `availability = 1`, `ln_availability = 0.0`, `visits = 0`,
      `cumulative_reward = 0.0`, `avail_epoch = t`, and under `RegretMatching` an
@@ -1156,7 +1176,10 @@ arm_stats.insert(at, ArmStats { avail_epoch: t, availability: 1, ..Default::defa
 arm_choices.insert(at, c.clone());
 if policy_in_use { arm_policy.insert(at, ArmPolicy::default()); }
 for x in &mut starts[s + 1 ..= arity as usize] { *x += 1; }
-arm_index = None;                          // payloads are global positions; they moved
+// The payloads are slot-relative, so nothing moved: insert the one new arm, or build
+// the index here if this arm is what takes the node past the threshold.
+match arm_index { Some(ix) => ix.insert(ArmRef::new(s, at - starts[s]), c),
+                  None if starts[arity] > threshold => build_arm_index() }
 ```
 
 Three consequences, each of which is why this is cheap enough to do inline:
@@ -1167,15 +1190,28 @@ Three consequences, each of which is why this is cheap enough to do inline:
   index, so **no stored `JointKey` ever has to be remapped**. Backup converts a key
   back to a global position with `starts[s] + key.arm(s, key_bits)`; that is the only
   place the two numberings meet.
-- **`arm_index` is dropped, not repaired.** Its payload is a global position, and the
-  insert moved every later one. It is rebuilt by the next `find_arm` that finds it
-  `None` while `starts[arity] > G::CHILD_INDEX_THRESHOLD`. Rebuilding costs one pass
-  over the arms.
-- **Inserts are rare after the first visit.** The first visit enumerates every slot and
-  builds the arrays in one pass, so `grow_slot` only runs when a later determinization
-  reveals an action no earlier one offered. The index rebuild is therefore amortized to
-  nothing, and `arm_stats` / `arm_choices` / `arm_policy` are `reserve_exact`'d on the
-  first visit so the common case never reallocates either.
+- **`arm_index` is repaired, not dropped.** Its payload is slot-relative for the same
+  reason a `JointKey`'s is, so an insert into slot `s` invalidates nothing and the new
+  arm is simply added. Discarding the index instead — which an earlier design did,
+  because the payload was then a global position — made expansion **quadratic in the
+  arm count**: `grow_slot` runs once per action on a node's *first* visit, so slot 0
+  scanned linearly and every later slot rebuilt an index that the next action threw
+  away, and under determinization every action a later determinization reveals did it
+  again. Measured on an ISMCTS shape (two players, 50 of a pool of 2,000 actions legal
+  per determinization, 2,000 iterations): 5,477,504 `Choice` comparisons discarding the
+  index, 296,186 maintaining it. That is the first measured region of
+  `tests/arm_index.rs`, as a gate.
+- **`grow_slot` is the only builder.** A node holds no arms until its first expansion
+  pass creates them, so slot 0 always enters `expand_marginals` below the threshold and
+  growth is the only thing that can take an arm set past it. `expand_marginals` has no
+  build of its own — a second copy of the threshold test there could never fire, and it
+  asserts the invariant instead in debug — so there is exactly one place an index comes
+  into existence. Without the build here nothing would ever build one: a fixed
+  512-action-per-player node over two visits costs 2,597 comparisons with it and 133,376
+  without, the latter being slot 0's first pass scanning linearly, `512*511/2`. That is
+  the second measured region of `tests/arm_index.rs`. `arm_stats` / `arm_choices` /
+  `arm_policy` are `reserve_exact`'d on the first visit, so arms present then cost no
+  reallocation.
 3. If `slot_len(s) == 0` after enumeration, or no arm of slot `s` is stamped
    (`avail_epoch == t`), the joint action does not exist: set
    `rewards = G::Rewards::uniform(cfg.min_reward)` and break out of the descent, exactly
@@ -1186,9 +1222,10 @@ Three consequences, each of which is why this is cheap enough to do inline:
 **`ROOT_CHOICES_INVARIANT` fast path at a simultaneous root.** When
 `G::ROOT_CHOICES_INVARIANT && node.is_root() && root_fully_expanded`, skip steps 1–2
 entirely and instead, for every arm of every slot: `availability += 1`,
-`ln_availability = ln(availability)`, `avail_epoch = t`. Move generation is what the
-invariant saves; the stamp is `sum(|A_i|)` word writes, the same order as the
-sequential path's `root_avail.resize`. Debug verification: §5.4.
+`avail_epoch = t`, and `ln_availability = ln(availability)` under `Duct` only. Move
+generation is what the invariant saves; the stamp is `sum(|A_i|)` word writes, the same
+order as the sequential path's `root_avail.resize` — which it would not be if it issued
+a libm call per arm on top. Debug verification: §5.4.
 
 ### 4.3 Per-player selection
 

@@ -817,8 +817,8 @@ mod tests {
         let actions = [0u8, 1, 2];
         for _ in 0..iterations {
             let epoch = node.visits();
-            node.expand_marginals(0, &actions, true, usize::MAX);
-            node.expand_marginals(1, &actions, true, usize::MAX);
+            node.expand_marginals(0, &actions, RM, usize::MAX);
+            node.expand_marginals(1, &actions, RM, usize::MAX);
             let simul = node.simul_mut().expect("just created");
             let (a0, mu0) = select_marginal(simul, 0, epoch, RM, exploration, 1.0, &mut rng)
                 .expect("every action is legal");
@@ -957,8 +957,8 @@ mod tests {
         let mut early = 0.0;
         for i in 0..long {
             let epoch = node.visits();
-            node.expand_marginals(0, &actions, true, usize::MAX);
-            node.expand_marginals(1, &actions, true, usize::MAX);
+            node.expand_marginals(0, &actions, RM, usize::MAX);
+            node.expand_marginals(1, &actions, RM, usize::MAX);
             let simul = node.simul_mut().expect("just created");
             let (a0, mu0) =
                 select_marginal(simul, 0, epoch, RM, exploration, 1.0, &mut rng).unwrap();
@@ -1027,7 +1027,7 @@ mod tests {
         const ARMS: usize = 20;
         let choices: Vec<u8> = (0..ARMS as u8).collect();
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &choices, false, usize::MAX);
+        node.expand_marginals(0, &choices, DUCT, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         for arm in 0..ARMS {
             let stats = &mut simul.arm_stats[arm];
@@ -1083,7 +1083,7 @@ mod tests {
     #[test]
     fn the_deterministic_root_move_is_not_the_visit_argmax() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1, 2], true, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1, 2], RM, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         simul.arm_policy[0].strategy_sum = 200.0;
         simul.arm_stats[0].availability = 1_000;
@@ -1124,7 +1124,7 @@ mod tests {
     #[test]
     fn the_deterministic_root_move_answers_a_zero_mass_legal_set() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1, 2], true, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1, 2], RM, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         for (arm, (visits, reward)) in [(100u32, 40.0), (100, 70.0), (1, 1.0)]
             .into_iter()
@@ -1172,7 +1172,7 @@ mod tests {
 
         let draws = |scale: f64| -> Vec<u32> {
             let mut node = simul_node(PlayerSet::first_n(1));
-            node.expand_marginals(0, &[0u8, 1, 2, 3], false, usize::MAX);
+            node.expand_marginals(0, &[0u8, 1, 2, 3], DUCT, usize::MAX);
             let simul = node.simul_mut().expect("simultaneous");
             // Arms 0 and 1 are exactly tied and lead; arm 3 sits 0.03 of the
             // span below them, which is outside the tolerance and inside three
@@ -1252,7 +1252,7 @@ mod tests {
     #[test]
     fn sampling_follows_the_mixed_distribution_it_reports() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1, 2, 3], true, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1, 2, 3], RM, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         for (arm, regret) in [3.0, 1.0, 0.0, -2.0].into_iter().enumerate() {
             simul.arm_policy[arm].regret = regret;
@@ -1298,8 +1298,8 @@ mod tests {
                 legal_for_arm_two += 1;
             }
             let actions: &[u8] = if sometimes { &[0, 1, 2] } else { &[0, 1] };
-            node.expand_marginals(0, actions, true, usize::MAX);
-            node.expand_marginals(1, &[0u8, 1], true, usize::MAX);
+            node.expand_marginals(0, actions, RM, usize::MAX);
+            node.expand_marginals(1, &[0u8, 1], RM, usize::MAX);
             let simul = node.simul_mut().expect("simultaneous");
             let (a0, mu0) = select_marginal(simul, 0, epoch, RM, floor(), 1.0, &mut rng).unwrap();
             let (a1, mu1) = select_marginal(simul, 1, epoch, RM, floor(), 1.0, &mut rng).unwrap();
@@ -1338,7 +1338,7 @@ mod tests {
     #[test]
     fn duct_breaks_a_tie_uniformly() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1, 2, 3], false, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1, 2, 3], DUCT, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         for arm in 0..4 {
             let stats = &mut simul.arm_stats[arm];
@@ -1366,7 +1366,7 @@ mod tests {
     #[test]
     fn duct_opens_unvisited_arms_uniformly() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1, 2, 3], false, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1, 2, 3], DUCT, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         simul.arm_stats[1].visits = 7;
         simul.arm_stats[1].cumulative_reward = 7.0;
@@ -1392,7 +1392,7 @@ mod tests {
     #[test]
     fn nothing_is_selected_when_no_arm_is_legal() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1], true, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1], RM, usize::MAX);
         node.record(0.0);
         let simul = node.simul_mut().expect("simultaneous");
         let mut rng = WyRand::seed_from_u64(1);
@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn root_extraction_divides_out_availability() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1], true, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1], RM, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         // Equal strategy mass, but one arm was legal five times as often — so
         // the arm that was rarely legal was played on nearly every iteration
@@ -1461,7 +1461,7 @@ mod tests {
     #[test]
     fn root_extraction_falls_back_to_uniform_over_the_legal_arms() {
         let mut node = simul_node(PlayerSet::first_n(1));
-        node.expand_marginals(0, &[0u8, 1, 2], true, usize::MAX);
+        node.expand_marginals(0, &[0u8, 1, 2], RM, usize::MAX);
         let simul = node.simul().expect("simultaneous");
 
         let mut strategy = Vec::new();

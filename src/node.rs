@@ -4,7 +4,7 @@ use core::ops::Range;
 use hashbrown::HashTable;
 use rand_core::Rng;
 
-use crate::game::PlayerSet;
+use crate::game::{PlayerSet, SimultaneousPolicy};
 use crate::util::{below, hash_of};
 
 /// A node in the search tree.
@@ -16,7 +16,8 @@ use crate::util::{below, hash_of};
 /// node. A node is never both, so the two share one allocation.
 pub struct Node<C> {
     pub(crate) cumulative_reward: f64,
-    /// Cached `ln(availability)`, refreshed only when `availability` changes.
+    /// Cached `ln(availability)`, refreshed only when `availability` changes —
+    /// and only at a non-root parent, the only place `select` reads it.
     pub(crate) ln_availability: f64,
     pub(crate) children: Vec<Node<C>>,
     pub(crate) extra: Option<Box<Extra<C>>>,
@@ -162,10 +163,11 @@ pub(crate) struct Simul<C> {
     /// array — 8 candidates per cache line at any arity — instead of striding
     /// 64 to 88 bytes into `children` to reach a field.
     pub(crate) joint_keys: Vec<JointKey>,
-    /// One index over *all* arms, hashed on `(slot, choice)`, built once the
-    /// total arm count passes `Game::CHILD_INDEX_THRESHOLD`. One index rather
-    /// than one per participant, because arms live in one flat array and a
-    /// slot-tagged hash distinguishes them for free.
+    /// One index over *all* arms, hashed on `(slot, choice)` and holding an
+    /// [`ArmRef`], built once the total arm count passes
+    /// `Game::CHILD_INDEX_THRESHOLD`. One index rather than one per
+    /// participant, because arms live in one flat array and a slot-tagged hash
+    /// distinguishes them for free.
     pub(crate) arm_index: Option<ChildIndex>,
     pub(crate) joint_index: Option<ChildIndex>,
     pub(crate) players: PlayerSet,
@@ -185,6 +187,11 @@ pub(crate) struct ArmStats {
     /// `Marginals::mean_reward` and `Duct` read a real reward.
     pub(crate) cumulative_reward: f64,
     /// Cached `ln(availability)`, the arm's ISMCTS exploration denominator.
+    /// Maintained only under `SimultaneousPolicy::Duct`, which is the only
+    /// reader; a mixing policy leaves it at zero rather than paying an `ln` per
+    /// arm per visit. The field itself stays either way — dropping it would
+    /// take `ArmStats` off its 32-byte stride, where `avail_epoch` rides the
+    /// same line as the statistics.
     pub(crate) ln_availability: f64,
     pub(crate) visits: u32,
     /// Iterations at this node in which this action was legal for this player.
@@ -316,18 +323,46 @@ impl JointKey {
     }
 }
 
-/// The slot owning the arm at global position `arm`.
+/// What the arm index stores: an arm's slot, and its position **within** that
+/// slot.
 ///
-/// A linear walk over at most [`PlayerSet::MAX_SIMULTANEOUS`] boundaries, which
-/// beats a binary search at this size and keeps the hash index's payload a bare
-/// position rather than a position plus a slot tag.
-#[inline]
-fn slot_of_arm(starts: &[u32; 9], arity: u8, arm: usize) -> usize {
-    let mut slot = 0;
-    while slot + 1 < arity as usize && (starts[slot + 1] as usize) <= arm {
-        slot += 1;
+/// A global position would not survive `Simul::grow_slot`, which inserts in the
+/// middle of the flat arm arrays and moves every later arm along — the same
+/// reason a [`JointKey`] holds slot-relative indices. Three bits of slot,
+/// because arity is capped at [`PlayerSet::MAX_SIMULTANEOUS`]; the remaining 29
+/// are more than a `JointKey` can address at arity 3 and above, which
+/// `grow_slot` asserts, and more arms at arity 1 or 2 than the arm array could
+/// hold in memory — 2^29 of them is 16 GB of `ArmStats` alone.
+#[derive(Clone, Copy)]
+struct ArmRef(u32);
+
+impl ArmRef {
+    const SLOT_BITS: u32 = 3;
+    const SLOT_MASK: u32 = (1 << Self::SLOT_BITS) - 1;
+
+    #[inline(always)]
+    fn new(slot: usize, relative: usize) -> Self {
+        debug_assert!(slot < PlayerSet::MAX_SIMULTANEOUS);
+        debug_assert!(relative < (1 << (32 - Self::SLOT_BITS)));
+        Self(((relative as u32) << Self::SLOT_BITS) | slot as u32)
     }
-    slot
+
+    #[inline(always)]
+    fn slot(self) -> usize {
+        (self.0 & Self::SLOT_MASK) as usize
+    }
+
+    #[inline(always)]
+    fn relative(self) -> usize {
+        (self.0 >> Self::SLOT_BITS) as usize
+    }
+}
+
+/// The key the arm index hashes: an arm is identified by its slot and its
+/// choice, so one index serves every participant.
+#[inline]
+fn arm_hash<C: Hash>(slot: usize, choice: &C) -> u64 {
+    hash_of(&(slot as u32, choice))
 }
 
 impl<C> Node<C> {
@@ -548,15 +583,20 @@ impl<C> Node<C> {
     /// The `Game::ROOT_CHOICES_INVARIANT` fast path at a simultaneous root:
     /// move generation is what the invariant saves, and the stamp is
     /// `sum(|A_i|)` word writes, the same order as the sequential path's
-    /// `root_avail.resize`.
-    pub(crate) fn restamp_marginals(&mut self) {
+    /// `root_avail.resize` — which it would not be if it issued a libm call per
+    /// arm on top, so the cached logarithm is refreshed only for the policy
+    /// that reads it.
+    pub(crate) fn restamp_marginals(&mut self, policy: SimultaneousPolicy) {
         let epoch = self.visits;
+        let caches_ln = policy.reads_ln_availability();
         let simul = self
             .simul_mut()
             .expect("mcts: only a simultaneous node has marginals to restamp");
         for arm in &mut simul.arm_stats {
             arm.availability += 1;
-            arm.ln_availability = (arm.availability as f64).ln();
+            if caches_ln {
+                arm.ln_availability = (arm.availability as f64).ln();
+            }
             arm.avail_epoch = epoch;
         }
         self.debug_check_arms();
@@ -744,7 +784,16 @@ impl<C: Clone + Eq + Hash> Node<C> {
                 Some(k) => {
                     let child = &mut self.children[k];
                     child.availability += 1;
-                    child.ln_availability = (child.availability as f64).ln();
+                    // Only a non-root parent scores its children against their
+                    // own availability: at a root `select` uses the root's
+                    // visit count, and `reroot_at` resets the field on the one
+                    // promotion that could make a root child read it again. So
+                    // a root child pays the increment, which the root ranking
+                    // divides by, and not the `ln` for a denominator nothing
+                    // reads.
+                    if !is_root {
+                        child.ln_availability = (child.availability as f64).ln();
+                    }
                     avail[k] = true;
                 }
                 None if is_root => {
@@ -787,17 +836,25 @@ impl<C: Clone + Eq + Hash> Node<C> {
         &mut self,
         slot: usize,
         choices: &[C],
-        policy_in_use: bool,
+        policy: SimultaneousPolicy,
         threshold: usize,
     ) -> usize {
         let epoch = self.visits;
+        let policy_in_use = policy.mixes();
+        let caches_ln = policy.reads_ln_availability();
         let simul = self
             .simul_mut()
             .expect("mcts: marginals belong to a simultaneous node");
 
-        if simul.arm_index.is_none() && simul.arm_choices.len() > threshold {
-            simul.build_arm_index();
-        }
+        // `grow_slot` is the sole builder, and holds the invariant: an arm set
+        // past the threshold has an index. Building here as well would be a
+        // second copy of the threshold test that can never fire — a node holds
+        // no arms before its first growth, and any growth that crosses the
+        // threshold leaves an index behind.
+        debug_assert!(
+            simul.arm_index.is_some() || simul.arm_choices.len() <= threshold,
+            "mcts: an arm set past the index threshold has no index"
+        );
         if simul.slot_len(slot) == 0 {
             simul.reserve_slot(choices.len(), policy_in_use);
         }
@@ -810,12 +867,14 @@ impl<C: Clone + Eq + Hash> Node<C> {
                 Some(a) => {
                     let arm = &mut simul.arm_stats[a];
                     arm.availability += 1;
-                    arm.ln_availability = (arm.availability as f64).ln();
+                    if caches_ln {
+                        arm.ln_availability = (arm.availability as f64).ln();
+                    }
                     arm.avail_epoch = epoch;
                     legal += 1;
                 }
                 None => {
-                    simul.grow_slot(slot, choice, epoch, policy_in_use);
+                    simul.grow_slot(slot, choice, epoch, policy_in_use, threshold);
                     legal += 1;
                 }
             }
@@ -908,6 +967,12 @@ impl<C> Simul<C> {
 }
 
 impl<C: Clone + Eq + Hash> Simul<C> {
+    /// The global position an [`ArmRef`] names.
+    #[inline(always)]
+    fn arm_at(&self, arm: ArmRef) -> usize {
+        self.starts[arm.slot()] as usize + arm.relative()
+    }
+
     /// The global position of `slot`'s arm for `choice`, if it has one.
     pub(crate) fn find_arm(&self, slot: usize, choice: &C) -> Option<usize> {
         let range = self.slot_range(slot);
@@ -921,28 +986,41 @@ impl<C: Clone + Eq + Hash> Simul<C> {
             }
             Some(index) => index
                 .table
-                .find(hash_of(&(slot as u32, choice)), |&a| {
-                    let a = a as usize;
-                    slot_of_arm(&self.starts, self.arity, a) == slot
-                        && &self.arm_choices[a] == choice
+                .find(arm_hash(slot, choice), |&packed| {
+                    let arm = ArmRef(packed);
+                    arm.slot() == slot && &self.arm_choices[self.arm_at(arm)] == choice
                 })
-                .map(|&a| a as usize),
+                .map(|&packed| self.arm_at(ArmRef(packed))),
         }
     }
 
     fn build_arm_index(&mut self) {
-        let choices: &[C] = &self.arm_choices;
-        let starts = &self.starts;
-        let arity = self.arity;
+        let Simul {
+            arm_choices,
+            arm_index,
+            starts,
+            arity,
+            ..
+        } = self;
+        let choices: &[C] = arm_choices;
         let mut table = HashTable::with_capacity(choices.len());
-        for (a, choice) in choices.iter().enumerate() {
-            let hash = hash_of(&(slot_of_arm(starts, arity, a) as u32, choice));
-            let _ = table.insert_unique(hash, a as u32, |&b| {
-                let b = b as usize;
-                hash_of(&(slot_of_arm(starts, arity, b) as u32, &choices[b]))
-            });
+        for slot in 0..*arity as usize {
+            let start = starts[slot] as usize;
+            for (relative, choice) in choices[start..starts[slot + 1] as usize].iter().enumerate() {
+                let _ = table.insert_unique(
+                    arm_hash(slot, choice),
+                    ArmRef::new(slot, relative).0,
+                    |&packed| {
+                        let other = ArmRef(packed);
+                        arm_hash(
+                            other.slot(),
+                            &choices[starts[other.slot()] as usize + other.relative()],
+                        )
+                    },
+                );
+            }
         }
-        self.arm_index = Some(ChildIndex { table });
+        *arm_index = Some(ChildIndex { table });
     }
 
     /// Append an arm to slot `slot`, in the middle of the flat arrays.
@@ -951,7 +1029,14 @@ impl<C: Clone + Eq + Hash> Simul<C> {
     /// slot's arms keep theirs, so no stored [`JointKey`] has to be remapped —
     /// which is the whole reason a key holds slot-relative indices rather than
     /// global positions.
-    fn grow_slot(&mut self, slot: usize, choice: &C, epoch: u32, policy_in_use: bool) {
+    fn grow_slot(
+        &mut self,
+        slot: usize,
+        choice: &C,
+        epoch: u32,
+        policy_in_use: bool,
+        threshold: usize,
+    ) {
         let at = self.starts[slot + 1] as usize;
         let new_len = at - self.starts[slot] as usize + 1;
         let capacity = JointKey::capacity(self.key_bits);
@@ -982,9 +1067,43 @@ impl<C: Clone + Eq + Hash> Simul<C> {
         for start in &mut self.starts[slot + 1..=arity] {
             *start += 1;
         }
-        // The index's payloads are global positions, and the insert moved every
-        // later one. Rebuilt by the next expansion pass that finds it gone.
-        self.arm_index = None;
+
+        // The index survives the insert: every payload is slot-relative, this
+        // slot's existing arms keep their positions and the new one takes the
+        // next, so only the new arm has to be added. Discarding the index
+        // instead would make a node's expansion quadratic in its arm count —
+        // the first visit of a wide node rebuilds it once per action and scans
+        // linearly in between, and under determinization every action a later
+        // determinization reveals does it again.
+        if self.arm_index.is_none() {
+            // The only place the index is ever built. A node holds no arms
+            // until its first expansion pass grows them, so growth is the only
+            // thing that can take an arm set past the threshold.
+            if self.arm_choices.len() > threshold {
+                self.build_arm_index();
+            }
+            return;
+        }
+        let Simul {
+            arm_choices,
+            arm_index,
+            starts,
+            ..
+        } = self;
+        if let Some(index) = arm_index {
+            let choices: &[C] = arm_choices;
+            let _ = index.table.insert_unique(
+                arm_hash(slot, &choices[at]),
+                ArmRef::new(slot, at - starts[slot] as usize).0,
+                |&packed| {
+                    let other = ArmRef(packed);
+                    arm_hash(
+                        other.slot(),
+                        &choices[starts[other.slot()] as usize + other.relative()],
+                    )
+                },
+            );
+        }
     }
 }
 
@@ -1163,12 +1282,17 @@ impl<'a, C> Marginals<'a, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand_core::SeedableRng;
+    use wyrand::WyRand;
+
+    const RM: SimultaneousPolicy = SimultaneousPolicy::RegretMatching;
+    const DUCT: SimultaneousPolicy = SimultaneousPolicy::Duct;
 
     fn simul_of(players: PlayerSet, slots: &[&[u16]], policy_in_use: bool) -> Simul<u16> {
         let mut simul = Simul::new(players);
         for (slot, choices) in slots.iter().enumerate() {
             for choice in *choices {
-                simul.grow_slot(slot, choice, 0, policy_in_use);
+                simul.grow_slot(slot, choice, 0, policy_in_use, usize::MAX);
             }
         }
         simul
@@ -1256,9 +1380,9 @@ mod tests {
         };
         let before: Vec<Vec<u16>> = keys.iter().map(|&key| meaning(&simul, key)).collect();
 
-        simul.grow_slot(0, &12, 7, true);
-        simul.grow_slot(1, &23, 7, true);
-        simul.grow_slot(0, &13, 7, true);
+        simul.grow_slot(0, &12, 7, true, usize::MAX);
+        simul.grow_slot(1, &23, 7, true, usize::MAX);
+        simul.grow_slot(0, &13, 7, true, usize::MAX);
 
         for (key, expected) in keys.iter().zip(&before) {
             assert_eq!(&meaning(&simul, *key), expected);
@@ -1273,18 +1397,18 @@ mod tests {
         assert_eq!(simul.find_arm(1, &23), Some(4 + 3));
     }
 
-    fn expanded_node(threshold: usize) -> Node<u16> {
+    fn expanded_node(threshold: usize, policy: SimultaneousPolicy) -> Node<u16> {
         let mut node = Node::new_root(0);
         node.ensure_simul(PlayerSet::first_n(2));
         let first: Vec<u16> = (0..40).collect();
         let second: Vec<u16> = (100..130).collect();
         for _ in 0..2 {
             assert_eq!(
-                node.expand_marginals(0, &first, true, threshold),
+                node.expand_marginals(0, &first, policy, threshold),
                 first.len()
             );
             assert_eq!(
-                node.expand_marginals(1, &second, true, threshold),
+                node.expand_marginals(1, &second, policy, threshold),
                 second.len()
             );
             node.record(0.0);
@@ -1294,8 +1418,8 @@ mod tests {
 
     #[test]
     fn indexed_and_scanned_arm_lookup_agree() {
-        let scanned = expanded_node(usize::MAX);
-        let indexed = expanded_node(4);
+        let scanned = expanded_node(usize::MAX, RM);
+        let indexed = expanded_node(4, RM);
         let scanned = scanned.simul().unwrap();
         let indexed = indexed.simul().unwrap();
         assert!(scanned.arm_index.is_none());
@@ -1318,7 +1442,7 @@ mod tests {
 
     #[test]
     fn expansion_stamps_every_arm_once_per_visit() {
-        let node = expanded_node(4);
+        let node = expanded_node(4, DUCT);
         let simul = node.simul().unwrap();
         assert_eq!(simul.arm_stats.len(), 70);
         for arm in &simul.arm_stats {
@@ -1326,6 +1450,96 @@ mod tests {
             assert_eq!(arm.avail_epoch, 1);
             assert_eq!(arm.ln_availability, 2.0f64.ln());
         }
+    }
+
+    /// `ln_availability` is `Duct`'s exploration denominator and nothing else
+    /// reads it, so a mixing policy must not pay a libm call per arm per visit
+    /// to maintain it. The availability *count* is read by every policy, so it
+    /// keeps moving either way.
+    #[test]
+    fn only_duct_pays_for_the_availability_logarithm() {
+        for (policy, expected) in [(DUCT, 2.0f64.ln()), (RM, 0.0)] {
+            let mut node = expanded_node(4, policy);
+            for arm in &node.simul().unwrap().arm_stats {
+                assert_eq!(arm.availability, 2);
+                assert_eq!(arm.ln_availability, expected);
+            }
+
+            // The `ROOT_CHOICES_INVARIANT` fast path stamps the same arms
+            // without enumerating them, and has the same reason not to.
+            node.record(0.0);
+            node.restamp_marginals(policy);
+            let expected = if policy == DUCT { 3.0f64.ln() } else { 0.0 };
+            for arm in &node.simul().unwrap().arm_stats {
+                assert_eq!(arm.availability, 3);
+                assert_eq!(arm.ln_availability, expected);
+            }
+        }
+    }
+
+    /// `select` scores a root's children against the root's own visit count,
+    /// so a root child's `ln_availability` has no reader — and a search at a
+    /// root that enumerates its choices every iteration would otherwise pay a
+    /// libm call for each of them.
+    #[test]
+    fn a_root_child_pays_no_availability_logarithm() {
+        let choices: Vec<u16> = (0..4).collect();
+        let mut avail = Vec::new();
+        let mut rng = WyRand::seed_from_u64(1);
+
+        let mut root = Node::new_root(0);
+        for _ in 0..2 {
+            root.expand(&choices, 0, usize::MAX, &mut avail, &mut rng);
+        }
+        assert_eq!(root.children.len(), choices.len());
+        for child in &root.children {
+            assert_eq!(child.availability, 2);
+            assert_eq!(child.ln_availability, 0.0);
+        }
+
+        // The same expansion under a non-root parent, where `select` does read
+        // the field, must still cache it.
+        let mut inner = Node::new(0, NodeKind::Choice, Some(9u16));
+        for _ in 0..5 {
+            inner.expand(&choices, 0, usize::MAX, &mut avail, &mut rng);
+        }
+        let opened = &inner.children[0];
+        assert!(opened.availability > 1);
+        assert_eq!(opened.ln_availability, (opened.availability as f64).ln());
+    }
+
+    /// The arm index's payloads are slot-relative so that growing a slot moves
+    /// no other arm's identity — which is what lets a newly discovered action
+    /// be inserted rather than force the whole index to be thrown away and
+    /// rebuilt on the next pass.
+    #[test]
+    fn growing_a_slot_keeps_the_arm_index() {
+        let mut node = expanded_node(4, RM);
+        // A threshold no arm count can cross, so nothing here can *rebuild* the
+        // index: what the lookups below find is the index built before the
+        // growth, or nothing.
+        let unreachable = usize::MAX;
+        assert_eq!(
+            node.expand_marginals(0, &[40, 41], RM, unreachable),
+            2,
+            "two actions no earlier determinization offered"
+        );
+        assert_eq!(node.expand_marginals(1, &[130], RM, unreachable), 1);
+
+        let simul = node.simul().unwrap();
+        assert!(
+            simul.arm_index.is_some(),
+            "the index was discarded by a newly discovered action"
+        );
+        for (slot, present) in [(0, 0..42u16), (1, 100..131)] {
+            for choice in present {
+                let found = simul.find_arm(slot, &choice).expect("an arm exists");
+                assert_eq!(simul.arm_choices[found], choice);
+                assert!(simul.slot_range(slot).contains(&found));
+            }
+        }
+        assert_eq!(simul.find_arm(0, &130), None);
+        assert_eq!(simul.find_arm(1, &41), None);
     }
 
     #[test]
@@ -1428,7 +1642,7 @@ mod tests {
         }
         let target = node.simul().unwrap().find_joint(kept).unwrap();
         node.children[target].ensure_simul(PlayerSet::first_n(2));
-        node.children[target].expand_marginals(0, &[7u16, 8], true, 16);
+        node.children[target].expand_marginals(0, &[7u16, 8], RM, 16);
 
         assert!(node.reroot_at_joint(kept));
         assert_eq!(node.kind(), NodeKind::Root);
