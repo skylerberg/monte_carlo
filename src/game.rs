@@ -11,11 +11,20 @@ pub trait Rewards: Copy {
     /// This player's payoff.
     fn reward(&self, player: u8) -> f64;
 
-    /// All-zero payoffs, used for the degenerate node with no legal choices.
+    /// The same payoff for every player, used for the degenerate node with no
+    /// legal choices.
     ///
-    /// `Default` would do, but std only implements it for arrays up to length
-    /// 32, and requiring it would cap the player count for no reason.
-    fn zero() -> Self;
+    /// The search builds that node's score out of
+    /// [`crate::Config::min_reward`], so the value it fabricates is inside the
+    /// range the caller declared. Fabricating a zero instead put a payoff the
+    /// game never produced into every accumulator on the path — out of range
+    /// for any game not paying through zero, and blamed on the game by the
+    /// reward-range assertion at a simultaneous node.
+    ///
+    /// `Default` would not do even for the zero it replaces: std only
+    /// implements it for arrays up to length 32, and requiring it would cap the
+    /// player count for no reason.
+    fn uniform(value: f64) -> Self;
 }
 
 impl<const N: usize> Rewards for [f64; N] {
@@ -25,8 +34,8 @@ impl<const N: usize> Rewards for [f64; N] {
     }
 
     #[inline(always)]
-    fn zero() -> Self {
-        [0.0; N]
+    fn uniform(value: f64) -> Self {
+        [value; N]
     }
 }
 

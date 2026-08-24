@@ -2,7 +2,7 @@ use core::hash::Hash;
 use std::sync::atomic::AtomicBool;
 
 use rand_core::Rng;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::game::Game;
 use crate::node::{Node, NodeKind};
@@ -84,6 +84,15 @@ where
     /// does not do is prove anything about the merged answer, so a pool of more
     /// than one worker never reports [`StopReason::Proven`]: early termination
     /// there trades merged-answer stability for wall clock.
+    ///
+    /// # Panics
+    ///
+    /// On everything [`Searcher::search`] panics on, including a `cfg` no
+    /// search can honour: no budget at all, or an empty or inverted reward
+    /// range. A config is refused on this thread rather than by eight workers
+    /// at once, and every worker's retained tree is disarmed first, so a
+    /// refused search leaves the pool exactly as a completed one does: holding
+    /// trees no later search will reuse.
     pub fn search(
         &mut self,
         state: &G,
@@ -92,6 +101,17 @@ where
         cfg: &Config,
         cancel: Option<&AtomicBool>,
     ) -> SearchResult<G::Choice> {
+        // Disarmed before the refusal, not after: a worker's `Searcher::search`
+        // consumes its own arming as its first statement, and a config rejected
+        // here means no worker's runs at all — which would leave every retained
+        // tree armed for a position the pool never searched.
+        if let Some(refusal) = cfg.refusal() {
+            for (searcher, _) in &mut self.workers {
+                searcher.disarm();
+            }
+            panic!("{refusal}");
+        }
+
         let results: Vec<SearchResult<G::Choice>> = std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .workers
@@ -167,6 +187,44 @@ where
             state.choices_for_into(ctx, perspective, &mut legal);
         } else {
             state.choices_into(ctx, &mut legal);
+        }
+        // Seeded in the first worker's own discovery order, then in the
+        // position's for anything that worker never saw. Both sides rank by
+        // `crate::rank` and both keep the incumbent on a tie, so what is left to
+        // agree on is the order the tie is scanned in: a candidate list built
+        // from the position runs in a different order from the arms of a tree
+        // that met them across determinizations, and a pool of one worker would
+        // then answer a tied root differently from the `Searcher` it is a pool
+        // of. Exact ties survive any budget — an all-arms-equal root at a
+        // budget below its own width has them at every seed.
+        let first_tree = self
+            .workers
+            .first()
+            .and_then(|(searcher, _)| searcher.tree());
+        if let Some(root) = first_tree {
+            let playable: FxHashSet<&G::Choice> = legal.iter().collect();
+            let mut seed = |choice: &G::Choice| {
+                if playable.contains(choice) {
+                    merged.slot(choice);
+                }
+            };
+            match root.simul() {
+                Some(simul) => {
+                    if let Some(slot) = simul.players.slot_of(perspective) {
+                        let marginals = simul.marginals(slot);
+                        for arm in 0..marginals.len() {
+                            seed(marginals.choice(arm));
+                        }
+                    }
+                }
+                None => {
+                    for child in root.children() {
+                        if let Some(choice) = child.edge().choice() {
+                            seed(choice);
+                        }
+                    }
+                }
+            }
         }
         for choice in &legal {
             merged.slot(choice);
@@ -443,7 +501,7 @@ fn sample_merged<R: Rng + ?Sized>(strategy: &[f64], rng: &mut R) -> Option<usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{JointChoices, PlayerSet, Status};
+    use crate::game::{JointChoices, PlayerSet, SimultaneousPolicy, Status};
     use crate::search::SimultaneousConfig;
     use crate::util::below;
     use rand_core::SeedableRng;
@@ -674,6 +732,147 @@ mod tests {
         }
     }
 
+    /// How many actions [`PermutedTie`] offers each player.
+    const PERMUTED_TIE_ACTIONS: u32 = 3;
+
+    /// One simultaneous ply under `Duct` where every joint action pays the same,
+    /// and whose determinizations enumerate the actions in the opposite order
+    /// from the real position.
+    ///
+    /// Both orders are legal — `choices_for_into` promises none — and the
+    /// disagreement is the whole fixture: the tree meets the actions in one
+    /// order and the position lists them in the other, so at a budget that
+    /// leaves every arm holding one visit of one payoff, every candidate is
+    /// exactly tied on the mean *and* on the selection rate and the answer is
+    /// whichever the extraction scans first. A tie like this survives any
+    /// budget, so it is the merge's ordering and nothing else that is under
+    /// test.
+    #[derive(Clone, Default)]
+    struct PermutedTie {
+        resolved: bool,
+        determinized: bool,
+    }
+
+    impl Game for PermutedTie {
+        type Choice = u8;
+        type Rewards = [f64; 2];
+        type Context = ();
+        type Side = ();
+
+        const SIMULTANEOUS_POLICY: SimultaneousPolicy = SimultaneousPolicy::Duct;
+
+        fn status(&self, _ctx: &()) -> Status<[f64; 2]> {
+            if self.resolved {
+                Status::Terminal([0.5, 0.5])
+            } else {
+                Status::Simultaneous {
+                    players: PlayerSet::first_n(2),
+                }
+            }
+        }
+
+        fn choices_into(&self, _ctx: &(), out: &mut Vec<u8>) {
+            let actions = 0..PERMUTED_TIE_ACTIONS as u8;
+            if self.determinized {
+                out.extend(actions.rev());
+            } else {
+                out.extend(actions);
+            }
+        }
+
+        fn apply_choice<R: Rng + ?Sized>(&mut self, _ctx: &(), _choice: &u8, _rng: &mut R) {
+            unreachable!("every node of this game is simultaneous")
+        }
+
+        fn apply_joint<R: Rng + ?Sized>(
+            &mut self,
+            _ctx: &(),
+            _joint: JointChoices<'_, u8>,
+            _rng: &mut R,
+        ) {
+            self.resolved = true;
+        }
+
+        fn rollout<R: Rng + ?Sized>(&mut self, _ctx: &(), _rng: &mut R) -> [f64; 2] {
+            [0.5, 0.5]
+        }
+
+        fn new_buffer(&self) -> Self {
+            Self::default()
+        }
+
+        fn determinize_into<R: Rng + ?Sized>(
+            &self,
+            dest: &mut Self,
+            _ctx: &(),
+            _perspective: u8,
+            _rng: &mut R,
+        ) {
+            dest.clone_from(self);
+            dest.determinized = true;
+        }
+    }
+
+    /// The sequential analogue of [`PermutedTie`]: one ply, every choice paying
+    /// the same, enumerated in the opposite order by a determinization.
+    ///
+    /// The merge seeds its candidate order from the first worker's tree and the
+    /// sequential branch of that seeding walks `children()`, so it needs a root
+    /// whose children the tree met in an order the position does not list them
+    /// in — the same disagreement `PermutedTie` builds out of arms.
+    #[derive(Clone, Default)]
+    struct PermutedLine {
+        resolved: bool,
+        determinized: bool,
+    }
+
+    impl Game for PermutedLine {
+        type Choice = u8;
+        type Rewards = [f64; 2];
+        type Context = ();
+        type Side = ();
+
+        fn status(&self, _ctx: &()) -> Status<[f64; 2]> {
+            if self.resolved {
+                Status::Terminal([0.5, 0.5])
+            } else {
+                Status::Active { player: 0 }
+            }
+        }
+
+        fn choices_into(&self, _ctx: &(), out: &mut Vec<u8>) {
+            let actions = 0..PERMUTED_TIE_ACTIONS as u8;
+            if self.determinized {
+                out.extend(actions.rev());
+            } else {
+                out.extend(actions);
+            }
+        }
+
+        fn apply_choice<R: Rng + ?Sized>(&mut self, _ctx: &(), _choice: &u8, _rng: &mut R) {
+            self.resolved = true;
+        }
+
+        fn rollout<R: Rng + ?Sized>(&mut self, _ctx: &(), _rng: &mut R) -> [f64; 2] {
+            [0.5, 0.5]
+        }
+
+        fn new_buffer(&self) -> Self {
+            Self::default()
+        }
+
+        fn determinize_into<R: Rng + ?Sized>(
+            &self,
+            dest: &mut Self,
+            _ctx: &(),
+            _perspective: u8,
+            _rng: &mut R,
+        ) {
+            dest.clone_from(self);
+            dest.determinized = true;
+        }
+    }
+
     fn seeded<G>(threads: usize, template: &G) -> RootParallel<G, WyRand>
     where
         G: Game<Choice = u8, Context = (), Side = ()> + Send + Sync,
@@ -891,6 +1090,104 @@ mod tests {
         let mut merged = [7.0, 3.0];
         spread(1_000.0, &[(0, 0.0), (1, 0.0)], &mut merged);
         assert_eq!(merged, [7.0, 3.0]);
+    }
+
+    /// A pool of one worker is the same search, so it must give the same
+    /// answer — ties included.
+    ///
+    /// Both sides rank by [`crate::rank`] and both keep the incumbent on a tie,
+    /// so an exactly tied root is settled by the order the candidates are
+    /// scanned in. The merge used to scan the position's own choice list while
+    /// `duct::best_arm` scans the tree's arms, and under determinization those
+    /// are different orders.
+    #[test]
+    fn a_duct_merge_breaks_a_tie_where_a_single_threaded_search_does() {
+        let game = PermutedTie::default();
+        let cfg = Config {
+            simultaneous: SimultaneousConfig {
+                root_policy: RootPolicy::MostVisited,
+                ..Default::default()
+            },
+            ..config(PERMUTED_TIE_ACTIONS)
+        };
+
+        let mut solo = Searcher::new(&game);
+        let single = solo.search(&game, &(), 0, &cfg, None, &mut WyRand::seed_from_u64(1));
+
+        let mut workers = seeded(1, &game);
+        let merged = workers.search(&game, &(), 0, &cfg, None);
+
+        let marginals = solo
+            .tree()
+            .expect("the search retained its tree")
+            .marginals(0)
+            .expect("player 0 acts at the root");
+        assert_eq!(marginals.len(), PERMUTED_TIE_ACTIONS as usize);
+        for arm in 0..marginals.len() {
+            assert_eq!(
+                (marginals.visits(arm), marginals.mean_reward(arm)),
+                (1, 0.5),
+                "the fixture only bites while every arm is exactly tied: arm {arm} \
+                 holds {} visits at {}",
+                marginals.visits(arm),
+                marginals.mean_reward(arm)
+            );
+        }
+        assert_ne!(
+            *marginals.choice(0),
+            0,
+            "the tree must meet the actions in a different order from the position, \
+             or there is no ordering left to disagree about"
+        );
+        assert_eq!(
+            merged.choice, single.choice,
+            "one position, one worker, two answers"
+        );
+    }
+
+    /// The sequential half of the same promise, which the merge seeds by a
+    /// different branch: a pool of one must answer a tied sequential root the
+    /// way the `Searcher` it is a pool of does.
+    ///
+    /// A budget equal to the width leaves every child holding one visit of one
+    /// payoff, so nothing separates them and the answer is whichever candidate
+    /// the extraction scans first. Seeding the merge from the position's choice
+    /// list alone answered the position's first choice while the tree, which
+    /// met them reversed, answered its last.
+    #[test]
+    fn a_sequential_merge_breaks_a_tie_where_a_single_threaded_search_does() {
+        let game = PermutedLine::default();
+        let cfg = config(PERMUTED_TIE_ACTIONS);
+
+        let mut solo = Searcher::new(&game);
+        let single = solo.search(&game, &(), 0, &cfg, None, &mut WyRand::seed_from_u64(1));
+
+        let mut workers = seeded(1, &game);
+        let merged = workers.search(&game, &(), 0, &cfg, None);
+
+        let root = solo.tree().expect("the search retained its tree");
+        assert_eq!(root.children().len(), PERMUTED_TIE_ACTIONS as usize);
+        for child in root.children() {
+            assert_eq!(
+                (child.visits(), child.mean_reward()),
+                (1, 0.5),
+                "the fixture only bites while every child is exactly tied: {:?} holds \
+                 {} visits at {}",
+                child.edge().choice(),
+                child.visits(),
+                child.mean_reward()
+            );
+        }
+        assert_ne!(
+            root.children()[0].edge().choice(),
+            Some(&0),
+            "the tree must meet the choices in a different order from the position, \
+             or there is no ordering left to disagree about"
+        );
+        assert_eq!(
+            merged.choice, single.choice,
+            "one position, one worker, two answers"
+        );
     }
 
     #[test]

@@ -45,7 +45,10 @@ pub enum RootPolicy {
     /// An action is selectable only on the iterations that offered it, so raw
     /// selections rank by legality rate as much as by value; both policies
     /// divide that out, and [`crate::Marginals::most_visited`] is the raw count
-    /// if you want it.
+    /// if you want it. Where the policy puts no weight on any legal action —
+    /// regret matching's strategy sum stays at zero for an action dominated
+    /// wherever it is legal — the answer is the leading action under the
+    /// crate's root ranking, which is still a ranking and still deterministic.
     ///
     /// Deterministic and reproducible, and exploitable wherever the equilibrium
     /// is mixed. Worth choosing when you need pinned output, or when you are
@@ -94,18 +97,34 @@ pub struct Config {
     /// search that spends its whole budget reports [`StopReason::Budget`]
     /// rather than [`StopReason::Proven`].
     pub early_termination: bool,
-    /// Bounds of the reward scale. Set these to your game's actual range.
+    /// Bounds of the reward scale. Set these to your game's actual range —
+    /// both bounds, and neither wider than the payoffs really are.
     ///
-    /// They are load-bearing at a simultaneous node, and in a way worth
-    /// spelling out because the default range is `[0, 1]` and a zero-sum game
-    /// paying in `[-1, 1]` is the likeliest thing to meet it. Regret matching
-    /// *clamps* payoffs into `[0, 1]` before touching a regret. It does not
-    /// rescale anything else: its strategy is invariant under any positive
-    /// rescaling of every regret, so the range reaches the search through the
-    /// clamp and nowhere else. Left at `[0, 1]`, a game paying `-1` for a loss
-    /// and `0` for a draw hands regret matching the same number for both, at
-    /// every budget, with no other symptom. Debug builds assert that observed
-    /// rewards fall inside the declared range at simultaneous nodes.
+    /// This is a declaration the search acts on, not a hint, and it is
+    /// load-bearing at a simultaneous node in two distinct ways. Under
+    /// [`crate::SimultaneousPolicy::RegretMatching`] it is the interval payoffs
+    /// are *clamped* into before touching a regret; nothing else there is
+    /// rescaled, since regret matching's strategy is invariant under any
+    /// positive rescaling of every regret. Left at `[0, 1]`, a game paying `-1`
+    /// for a loss and `0` for a draw hands regret matching the same number for
+    /// both, at every budget, with no other symptom. Under
+    /// [`crate::SimultaneousPolicy::Duct`] nothing is clamped and the width of
+    /// the range is instead the scale of decoupled UCB1's **tie tolerance**:
+    /// arms within 1% of it of the leading arm are drawn between uniformly. A
+    /// range declared much wider than the payoffs is harmless everywhere else —
+    /// it only makes the clamp looser — but it widens that tolerance until
+    /// every visited arm is inside it, at which point `Duct` selection is a
+    /// uniform random move picker. Measured on a two-arm game with a strictly
+    /// dominant row and payoffs in `[0, 1]`: 0.999 of the arm visits on the
+    /// dominant row at `max_reward = 1`, and 0.506 — chance — at
+    /// `max_reward = 200`.
+    ///
+    /// Rescaling a game's payoffs, this range and
+    /// [`SimultaneousConfig::duct_exploration`] together leaves `Duct` search
+    /// unchanged, which is the sense in which it is a scale and not a
+    /// tuning knob. Debug builds assert that observed rewards fall inside the
+    /// declared range at simultaneous nodes, under either policy; an empty or
+    /// inverted range is refused outright by [`Searcher::search`].
     pub max_reward: f64,
     /// See [`Config::max_reward`].
     pub min_reward: f64,
@@ -190,6 +209,50 @@ impl Default for Config {
             min_reward: 0.0,
             simultaneous: SimultaneousConfig::default(),
         }
+    }
+}
+
+impl Config {
+    /// Reject a config no search can honour, before any of it is read.
+    ///
+    /// The reward range is a declaration the crate acts on rather than a hint:
+    /// it scales the tie tolerance decoupled UCB1 admits arms into, it is the
+    /// interval regret matching clamps payoffs to, and it is the value the
+    /// degenerate empty-choice node is scored at. An empty or inverted range
+    /// leaves regret matching being fed a constant `0.5` for every payoff — a
+    /// driftless random walk over the regrets, measured at roughly twice the
+    /// exploitability of not searching at all — and `credit_marginals` used to
+    /// disable its range assertion in exactly that case, so nothing reported
+    /// it. There is no reading of `min_reward >= max_reward` worth guessing at,
+    /// so it is refused here.
+    pub(crate) fn validate(&self) {
+        if let Some(refusal) = self.refusal() {
+            panic!("{refusal}");
+        }
+    }
+
+    /// What [`Config::validate`] would refuse this config for, if anything.
+    ///
+    /// Split out from the panic so [`crate::RootParallel::search`] can disarm
+    /// its workers' retained trees before raising it. Every worker's
+    /// `Searcher::search` consumes its own arming *before* it validates, so a
+    /// config refused on the pool's own thread — where no worker's `search`
+    /// runs at all — has to consume them itself or leave a tree built for the
+    /// previous position armed for the next search.
+    pub(crate) fn refusal(&self) -> Option<String> {
+        if self.iterations == 0 && self.time_limit_ms.is_none() {
+            return Some("mcts: Config has neither an iteration nor a time budget".into());
+        }
+        if self.max_reward <= self.min_reward {
+            return Some(format!(
+                "mcts: Config declares the reward range [{}, {}], which is empty. Set both \
+                 bounds to your game's actual payoff range: regret matching cannot tell one \
+                 payoff from another inside an empty range, and decoupled UCB1 measures its \
+                 tie tolerance against the width of it.",
+                self.min_reward, self.max_reward
+            ));
+        }
+        None
     }
 }
 
@@ -415,6 +478,18 @@ impl<G: Game> Searcher<G> {
         self.root.take()
     }
 
+    #[cfg(feature = "parallel")]
+    /// Consume the retained tree's arming without searching.
+    ///
+    /// [`Searcher::search`] takes `tree_is_current` before it does anything
+    /// else, so every exit from it leaves the tree stale. A caller that
+    /// refuses a search on the searcher's behalf — [`crate::RootParallel`]
+    /// rejecting a config on its own thread, where no worker's `search` runs —
+    /// stands in for that entry and must do the same.
+    pub(crate) fn disarm(&mut self) {
+        self.tree_is_current = false;
+    }
+
     /// Discard the retained tree.
     pub fn clear_tree(&mut self) {
         self.root = None;
@@ -634,8 +709,9 @@ impl<G: Game> Searcher<G> {
     /// Search from `state` on behalf of `perspective` and return the most
     /// visited root choice.
     ///
-    /// Panics if `state` is terminal, has no legal choices, or if the config
-    /// specifies neither an iteration nor a time budget.
+    /// Panics if `state` is terminal, has no legal choices, if the config
+    /// specifies neither an iteration nor a time budget, or if it declares an
+    /// empty reward range.
     ///
     /// [`Game::advance`] is called on each determinization of `state` and must
     /// not fast-forward past the decision being searched — the answer list and
@@ -668,10 +744,7 @@ impl<G: Game> Searcher<G> {
         // out of the game — cannot leave the previous position's tree armed.
         let reuse = core::mem::take(&mut self.tree_is_current);
 
-        assert!(
-            cfg.iterations != 0 || cfg.time_limit_ms.is_some(),
-            "mcts: Config has neither an iteration nor a time budget"
-        );
+        cfg.validate();
 
         let (root_player, root_players) = match state.status(ctx) {
             Status::Active { player } => (player, None),
@@ -1315,9 +1388,9 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                         debug_assert!(
                             legal != 0,
                             "mcts: player {p} has no legal action at a simultaneous node, so \
-                             no joint action exists. The iteration scores zero, which will \
-                             drag this node's parent's mean down indistinguishably from a \
-                             bad evaluation."
+                             no joint action exists. The iteration scores the declared \
+                             minimum reward, which will drag this node's parent's mean down \
+                             indistinguishably from a bad evaluation."
                         );
                         if legal == 0 {
                             degenerate = true;
@@ -1334,7 +1407,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                     }
                 }
                 if degenerate {
-                    rewards = G::Rewards::zero();
+                    rewards = G::Rewards::uniform(cfg.min_reward);
                     break;
                 }
 
@@ -1362,7 +1435,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                 }
                 if degenerate {
                     sim_probs.truncate(prob_start as usize);
-                    rewards = G::Rewards::zero();
+                    rewards = G::Rewards::uniform(cfg.min_reward);
                     break;
                 }
 
@@ -1464,13 +1537,31 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
             avail
         };
 
-        let Some(i) = select(
+        let picked = select(
             node,
             available,
             cfg.exploration_constant,
             cfg.progressive_bias_weight,
-        ) else {
-            rewards = G::Rewards::zero();
+        );
+        // Named here rather than left to the simultaneous twin's assertion to
+        // report it: this payoff is credited to every node on the path, so a
+        // descent that dead-ends under a simultaneous node used to surface as
+        // that node's reward-range assertion accusing the game of a payoff the
+        // search had fabricated.
+        debug_assert!(
+            picked.is_some(),
+            "mcts: the descent cannot continue at this node. Either player {player} has \
+             no legal choice here, or every legal child scored a non-finite UCB value — \
+             `select` returns `None` for both, and a NaN comparison is false against any \
+             incumbent. The iteration scores the declared minimum reward, which will drag \
+             this node's parent's mean down indistinguishably from a bad evaluation."
+        );
+        let Some(i) = picked else {
+            // The declared floor rather than a zero, at all three degenerate
+            // sites: a fabricated payoff outside `[min_reward, max_reward]` is
+            // one the game never produced, and it lands in every accumulator on
+            // the path.
+            rewards = G::Rewards::uniform(cfg.min_reward);
             break;
         };
 
@@ -1574,7 +1665,7 @@ impl<G: Game> Backup<'_, G> {
             self.rewards,
             G::SIMULTANEOUS_POLICY,
             self.cfg.min_reward,
-            self.cfg.max_reward - self.cfg.min_reward,
+            self.cfg.max_reward,
         );
     }
 }

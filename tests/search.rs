@@ -364,6 +364,58 @@ fn a_panicking_pooled_search_disarms_every_worker() {
     );
 }
 
+/// A config the pool refuses is the one exit that skips the workers entirely,
+/// so it is the one exit that has to disarm them by hand.
+///
+/// `RootParallel::search` names an empty reward range on its own thread rather
+/// than as N threads panicking at once — which means no worker's
+/// `Searcher::search` runs, and it is that call which consumes a searcher's
+/// arming. Refusing before disarming left every retained tree armed for a
+/// position the pool never searched.
+#[cfg(feature = "parallel")]
+#[test]
+fn a_pooled_search_refused_for_its_config_disarms_every_worker() {
+    use mcts::RootParallel;
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+    const THREADS: usize = 2;
+    const BUDGET: u32 = 100;
+
+    let fuse = AtomicU32::new(u32::MAX);
+    let mut game = FusedFork::default();
+    let mut pool = RootParallel::new(THREADS, &game, |worker| rng(worker as u64 + 1));
+
+    let first = pool.search(&game, &fuse, 0, &config(BUDGET), None);
+    pool.reuse_subtree(&first.choice);
+    game.ply = 1;
+
+    let empty_range = Config {
+        min_reward: 1.0,
+        max_reward: 1.0,
+        ..config(BUDGET)
+    };
+    let unburned = fuse.load(Relaxed);
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        pool.search(&game, &fuse, 0, &empty_range, None);
+    }));
+    assert!(outcome.is_err(), "an empty reward range must be refused");
+    assert_eq!(
+        fuse.load(Relaxed),
+        unburned,
+        "the refusal must come before any worker touches the game"
+    );
+
+    game.ply = 2;
+    // Deliberately no reuse_subtree call here.
+    let next = pool.search(&game, &fuse, 0, &config(BUDGET), None);
+
+    assert_eq!(
+        next.reused_iterations, 0,
+        "the refused config left the previous position's tree armed"
+    );
+    assert_eq!(next.root_visits, BUDGET * THREADS as u32);
+}
+
 /// `Game::advance` may fast-forward past decisions the tree does not model, but
 /// not past the one being searched: the root player and the answer list are
 /// read before it and the tree is built after it, so consuming the root
@@ -1049,4 +1101,172 @@ fn a_pooled_merge_does_not_inherit_a_workers_proof() {
         pooled.iterations_used < BUDGET * THREADS as u32,
         "no worker stopped early, so nothing was merged over a truncated tree"
     );
+}
+
+/// A reward range with nothing in it is not a scale, and every consumer of the
+/// declared range reads it as one: regret matching normalizes every payoff it
+/// ever sees to a constant 0.5 there and its regrets carry no information at
+/// all, decoupled UCB1 measures a tie tolerance against a width of zero, and
+/// the degenerate empty-choice node has no in-range value to score. Measured on
+/// biased rock-paper-scissors, `[0.5, 0.5]` leaves the extracted strategy
+/// exploitable for 0.156 against 0.083 for playing uniformly at random — worse
+/// than not searching. It is refused before any of the config is read.
+#[test]
+#[should_panic(expected = "declares the reward range [0.5, 0.5], which is empty")]
+fn an_empty_reward_range_is_refused() {
+    let game = AlwaysWin { ply: 0 };
+    let cfg = Config {
+        min_reward: 0.5,
+        max_reward: 0.5,
+        ..config(10)
+    };
+    Searcher::new(&game).search(&game, &(), 1, &cfg, None, &mut rng(1));
+}
+
+/// An inverted range takes the same branch bit for bit, so it is refused by the
+/// same assertion rather than being read as the range its author meant.
+#[test]
+#[should_panic(expected = "declares the reward range [1, 0], which is empty")]
+fn an_inverted_reward_range_is_refused() {
+    let game = AlwaysWin { ply: 0 };
+    let cfg = Config {
+        min_reward: 1.0,
+        max_reward: 0.0,
+        ..config(10)
+    };
+    Searcher::new(&game).search(&game, &(), 1, &cfg, None, &mut rng(1));
+}
+
+/// A game that pays strictly inside `[MIN_PAY, MAX_PAY]`, with one root choice
+/// leading to a node where the player to move has no legal choice at all.
+///
+/// The descent cannot continue there, so the iteration is scored with a payoff
+/// the crate fabricates rather than one the game produced — and that payoff is
+/// credited to every node on the path. Fabricating a zero put a number outside
+/// the declared range into all of them.
+#[derive(Clone, Default)]
+struct DeadEnd {
+    stuck: bool,
+    resolved: bool,
+}
+
+impl DeadEnd {
+    /// The declared floor. Above zero, which is the whole point of the fixture.
+    const MIN_PAY: f64 = 1.0;
+    const MAX_PAY: f64 = 2.0;
+    /// What every line that reaches a terminal state pays both players.
+    const PAYOUT: f64 = 1.5;
+    /// The root choice that leads nowhere.
+    const STUCK: usize = 0;
+}
+
+impl mcts::Game for DeadEnd {
+    type Choice = usize;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> mcts::Status<[f64; 2]> {
+        if self.resolved {
+            mcts::Status::Terminal([Self::PAYOUT; 2])
+        } else {
+            mcts::Status::Active { player: 0 }
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+        if !self.stuck {
+            out.extend([Self::STUCK, 1]);
+        }
+    }
+
+    fn apply_choice<R: mcts::rand_core::Rng + ?Sized>(
+        &mut self,
+        _: &(),
+        choice: &usize,
+        _: &mut R,
+    ) {
+        if *choice == Self::STUCK {
+            self.stuck = true;
+        } else {
+            self.resolved = true;
+        }
+    }
+
+    fn rollout<R: mcts::rand_core::Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+        [Self::PAYOUT; 2]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: mcts::rand_core::Rng + ?Sized>(
+        &self,
+        dest: &mut Self,
+        _: &(),
+        _: u8,
+        _: &mut R,
+    ) {
+        dest.clone_from(self);
+    }
+}
+
+fn dead_end_config() -> Config {
+    Config {
+        min_reward: DeadEnd::MIN_PAY,
+        max_reward: DeadEnd::MAX_PAY,
+        ..config(200)
+    }
+}
+
+/// Every reward in the tree is one the game could have paid.
+///
+/// The value the crate fabricates for a node it cannot descend from is the
+/// declared floor, so it lands inside the range the caller promised. A zero
+/// there is a payoff no game paying in `[1, 2]` can produce, and it does not
+/// stay local: it is credited to every node on the path, drags their means
+/// below the range they are read against, and — under a simultaneous ancestor —
+/// trips the reward-range assertion in a message that blames the game for it.
+#[cfg(not(debug_assertions))]
+#[test]
+fn a_degenerate_node_scores_inside_the_declared_reward_range() {
+    let game = DeadEnd::default();
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &dead_end_config(), None, &mut rng(3));
+
+    let root = searcher.tree().expect("the search retained its tree");
+    let stuck = root
+        .children()
+        .iter()
+        .find(|child| child.edge().choice() == Some(&DeadEnd::STUCK))
+        .expect("the dead-end choice is a root child");
+    assert!(
+        stuck.visits() > 1,
+        "the dead end was never descended into, so nothing was fabricated"
+    );
+    for (name, mean) in [
+        ("the root", root.mean_reward()),
+        ("the dead end", stuck.mean_reward()),
+    ] {
+        assert!(
+            (DeadEnd::MIN_PAY..=DeadEnd::MAX_PAY).contains(&mean),
+            "{name} holds a mean reward of {mean}, outside the declared \
+             [{}, {}] range this game pays in",
+            DeadEnd::MIN_PAY,
+            DeadEnd::MAX_PAY
+        );
+    }
+}
+
+/// The same position in a debug build, where a node the descent cannot continue
+/// from is a bug worth naming at the node it happened at. It used to be
+/// reported, if at all, by the reward-range assertion at a simultaneous
+/// ancestor accusing the game of a payoff the search had fabricated.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "the descent cannot continue at this node")]
+fn a_degenerate_sequential_node_is_a_debug_assertion() {
+    let game = DeadEnd::default();
+    Searcher::new(&game).search(&game, &(), 0, &dead_end_config(), None, &mut rng(3));
 }
