@@ -1,6 +1,8 @@
 mod common;
 
-use common::{AlwaysWin, CountToThree, GameTree, PriorTrap, TreeNode};
+use common::{
+    AlwaysWin, CountToThree, GameTree, PriorTrap, RotatingThree, TreeNode, ROTATING_PAYOFFS,
+};
 use mcts::rand_core::SeedableRng;
 use mcts::{Config, Node, Searcher, StopReason};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -73,6 +75,67 @@ fn defeats_a_shallow_trap() {
         result.choice, 1,
         "took the branch that looks good but always loses"
     );
+}
+
+/// `max^n` backup credits a node with the reward of the player who moved into
+/// it, for any number of players — which is the claim `lib.rs` sells as "nothing
+/// assumes two players or zero sum". Nothing else in this suite can see it above
+/// player index 1: every other sequential fixture is two-player, so
+/// `rewards.reward(node.player)` and `rewards.reward(node.player.min(1))` are
+/// the same function, and an `assert!(node.player < 2)` at either backup site
+/// never fires across the whole suite.
+///
+/// Checked at the nodes rather than through the move that comes back: this game
+/// is small enough that the search opens all of it and solves it whatever the
+/// interior means say, so the returned choice is no evidence about the backup.
+#[test]
+fn max_n_backup_credits_the_third_player_too() {
+    let game = RotatingThree::new();
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &config(4_000), None, &mut rng(4));
+
+    let mut leaves = 0;
+    check_rotating(searcher.tree().unwrap(), 0, 0, &mut leaves);
+    assert_eq!(
+        leaves,
+        ROTATING_PAYOFFS.len(),
+        "the search opened {leaves} of the eight leaves, so the players it did not \
+         reach are unchecked"
+    );
+}
+
+/// Walks a [`RotatingThree`] tree, checking every node's reward player and every
+/// leaf's accumulator. A leaf is terminal, so what it was paid is not an average
+/// over anything: its cumulative reward is its visit count times one number, and
+/// which number says which player the backup credited.
+fn check_rotating(node: &Node<usize>, depth: usize, path: usize, leaves: &mut usize) {
+    assert_eq!(
+        node.reward_player(),
+        RotatingThree::PLAYER_AT_DEPTH[depth],
+        "the node at depth {depth} reached by {path:0depth$b} is stamped for player {}",
+        node.reward_player()
+    );
+    if depth == RotatingThree::PLAYER_AT_DEPTH.len() - 1 {
+        *leaves += 1;
+        let payoffs = ROTATING_PAYOFFS[path];
+        assert!(node.visits() > 0, "leaf {path:03b} was never visited");
+        assert!(
+            (node.cumulative_reward() - node.visits() as f64 * payoffs[2]).abs() < 1e-9,
+            "leaf {path:03b} accumulated {} over {} visits, which is {} a visit; it is \
+             stamped for player 2 and pays {payoffs:?}",
+            node.cumulative_reward(),
+            node.visits(),
+            node.mean_reward()
+        );
+        return;
+    }
+    for child in node.children() {
+        let choice = *child
+            .edge()
+            .choice()
+            .expect("a sequential root's children all carry a choice");
+        check_rotating(child, depth + 1, path << 1 | choice, leaves);
+    }
 }
 
 #[test]
@@ -797,14 +860,25 @@ fn wide_nodes_track_every_child() {
     assert_eq!(result.choice, WIDTH - 1, "should settle on the only win");
 }
 
+/// The whole claim of [`Config::early_termination`]: it buys iterations back
+/// and it does not change the move.
+///
+/// Both halves have to be asserted, and one of them is not free. `choice ==
+/// full` is a tautology on its own — with the flag inert the two searches are
+/// bit-identical runs of the same seed — and `root_visits <= BUDGET` cannot
+/// fail, because the budget is the ceiling. So this also pins that the search
+/// really stopped: `Proven` and a visit count strictly under the budget, which
+/// is what a build with early termination compiled out cannot produce. The
+/// fixture proves at 380 of 400, twenty short of `rank::MIN_EVIDENCE`.
 #[test]
 fn early_termination_does_not_change_the_answer() {
+    const BUDGET: u32 = 400;
     let game = GameTree::minimal_trap();
 
     let full = {
         let mut searcher = Searcher::new(&game);
         searcher
-            .search(&game, &(), 0, &config(400), None, &mut rng(21))
+            .search(&game, &(), 0, &config(BUDGET), None, &mut rng(21))
             .choice
     };
 
@@ -812,13 +886,24 @@ fn early_termination_does_not_change_the_answer() {
         let mut searcher = Searcher::new(&game);
         let cfg = Config {
             early_termination: true,
-            ..config(400)
+            ..config(BUDGET)
         };
         searcher.search(&game, &(), 0, &cfg, None, &mut rng(21))
     };
 
     assert_eq!(stopped.choice, full);
-    assert!(stopped.root_visits <= 400);
+    assert_eq!(
+        stopped.stop_reason,
+        StopReason::Proven,
+        "the search spent {} of its {BUDGET} iterations and stopped for {:?}, so \
+         nothing here was proved and the answer above is the same run twice",
+        stopped.root_visits,
+        stopped.stop_reason
+    );
+    assert!(
+        stopped.root_visits < BUDGET,
+        "the search reported a proof after spending its whole budget"
+    );
 }
 
 /// A one-ply root whose third choice only appears in a determinization once
@@ -1421,4 +1506,618 @@ fn a_non_finite_simultaneous_knob_is_refused() {
     let mut cfg = config(2000);
     cfg.simultaneous.duct_exploration = f64::NEG_INFINITY;
     Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
+}
+
+/// A node whose bad children are legal in only one determinization in
+/// [`RareTraps::PERIOD`], reached through a root ply the game ignores.
+///
+/// The fixture for the rule that makes this Information Set MCTS rather than
+/// UCT: below the root, a child's exploration term is measured against how often
+/// that child was *available*, not against how often its parent was visited. The
+/// two denominators differ by exactly the legality rate, so a fixture whose
+/// `determinize_into` is a clone — which is every other sequential fixture here
+/// — cannot tell them apart at all, and neither can the golden fingerprint.
+///
+/// Player 0 moves throughout. The first ply is a coin the game discards; it is
+/// here because a root offering one choice is a forced move, and because the
+/// root is the one level that deliberately scores its children against its own
+/// visit count. Both of its moves lead to the same trap node, so neither can be
+/// abandoned and the measurement happens one level down, where the availability
+/// rule lives.
+///
+/// The trap node offers [`RareTraps::GOOD`], worth [`RareTraps::GOOD_PAYOFF`]
+/// and legal in every world, and [`RareTraps::TRAPS`] traps worth nothing, each
+/// legal in one world in [`RareTraps::PERIOD`]. UCB1 keeps returning to a
+/// worthless child until its exploration term falls under the gap, which takes
+/// about `(c / gap)^2 * ln(denominator)` selections — so what the traps cost is
+/// a direct reading of which denominator the search used.
+#[derive(Clone)]
+struct RareTraps {
+    /// Determinizations drawn so far, shared with every copy, so which traps a
+    /// world offers is a fixed cycle rather than a draw: a trap's availability
+    /// is then `visits / PERIOD` and not a sample of it.
+    drawn: std::rc::Rc<std::cell::Cell<u32>>,
+    world: u32,
+    stage: RareStage,
+}
+
+#[derive(Clone, Copy)]
+enum RareStage {
+    Coin,
+    Traps,
+    Over(f64),
+}
+
+impl RareTraps {
+    const GOOD: usize = 0;
+    const TRAPS: usize = 400;
+    const PERIOD: u32 = 50;
+    const GOOD_PAYOFF: f64 = 0.6;
+
+    fn new() -> Self {
+        Self {
+            drawn: std::rc::Rc::new(std::cell::Cell::new(0)),
+            world: 0,
+            stage: RareStage::Coin,
+        }
+    }
+
+    fn offers(&self, trap: usize) -> bool {
+        (self.world + trap as u32).is_multiple_of(Self::PERIOD)
+    }
+}
+
+impl mcts::Game for RareTraps {
+    type Choice = usize;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> mcts::Status<[f64; 2]> {
+        match self.stage {
+            RareStage::Over(payoff) => mcts::Status::Terminal([payoff, 1.0 - payoff]),
+            _ => mcts::Status::Active { player: 0 },
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+        match self.stage {
+            RareStage::Coin => out.extend([0, 1]),
+            RareStage::Traps => {
+                out.push(Self::GOOD);
+                out.extend((1..=Self::TRAPS).filter(|&trap| self.offers(trap)));
+            }
+            RareStage::Over(_) => {}
+        }
+    }
+
+    fn apply_choice<R: mcts::rand_core::Rng + ?Sized>(
+        &mut self,
+        _: &(),
+        choice: &usize,
+        _: &mut R,
+    ) {
+        self.stage = match (self.stage, *choice) {
+            (RareStage::Coin, _) => RareStage::Traps,
+            (RareStage::Traps, Self::GOOD) => RareStage::Over(Self::GOOD_PAYOFF),
+            (RareStage::Traps, _) => RareStage::Over(0.0),
+            (over, _) => over,
+        };
+    }
+
+    fn rollout<R: mcts::rand_core::Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 2] {
+        let mut choices = Vec::new();
+        loop {
+            if let RareStage::Over(payoff) = self.stage {
+                return [payoff, 1.0 - payoff];
+            }
+            choices.clear();
+            self.choices_into(&(), &mut choices);
+            let k = ((rng.next_u64() as u128 * choices.len() as u128) >> 64) as usize;
+            let choice = choices[k];
+            self.apply_choice(&(), &choice, rng);
+        }
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: mcts::rand_core::Rng + ?Sized>(
+        &self,
+        dest: &mut Self,
+        _: &(),
+        _: u8,
+        _: &mut R,
+    ) {
+        dest.clone_from(self);
+        self.drawn.set(self.drawn.get() + 1);
+        dest.world = self.drawn.get();
+    }
+}
+
+/// Below the root, the exploration term's denominator is the child's own
+/// availability count, not its parent's visit count. Deleting that — scoring
+/// every child against `ln(parent visits)` — is deleting Information Set MCTS
+/// from the sequential path, and it leaves the rest of this suite, the golden
+/// fingerprint included, entirely green: no other sequential fixture's
+/// `determinize_into` varies the legal set, so the two denominators are the same
+/// number everywhere else.
+///
+/// The reading is how much of the budget the traps absorb. UCB1 keeps returning
+/// to a child worth nothing while its exploration term covers the gap to the
+/// leader, which is `c * sqrt(ln(denominator) / visits) > gap` — so it spends
+/// `(c / gap)^2 * ln(denominator)` selections on each of them and then stops.
+/// The traps here are legal one world in [`RareTraps::PERIOD`], so the two
+/// candidate denominators differ by that factor and the two rules predict a
+/// different integer. Measured: three selections per trap under the availability
+/// rule and five under the parent's visit count, in every seed.
+#[test]
+fn a_rarely_legal_child_is_explored_against_its_own_availability() {
+    const BUDGET: u32 = 40_000;
+
+    let game = RareTraps::new();
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &config(BUDGET), None, &mut rng(1));
+
+    // The busier of the two opening moves: they lead to the same position, and
+    // which of them the search settles on is not what is being measured.
+    let node = searcher
+        .tree()
+        .expect("a search leaves a tree")
+        .children()
+        .iter()
+        .max_by_key(|child| child.visits())
+        .expect("the root has both opening moves");
+    let traps: Vec<&Node<usize>> = node
+        .children()
+        .iter()
+        .filter(|child| *child.edge().choice().unwrap() != RareTraps::GOOD)
+        .collect();
+    assert_eq!(
+        traps.len(),
+        RareTraps::TRAPS,
+        "the node the search built holds {} of the {} traps, so most of them were \
+         never offered and there is nothing here to measure",
+        traps.len(),
+        RareTraps::TRAPS
+    );
+
+    // `(c / gap)^2 * ln(denominator)`, rounded up: the selections UCB1 spends on
+    // a child worth nothing before its exploration term stops covering the gap
+    // to a leader worth `GOOD_PAYOFF`.
+    let budget_for = |ln_total: f64| {
+        let ratio = config(BUDGET).exploration_constant / RareTraps::GOOD_PAYOFF;
+        (ratio * ratio * ln_total).ceil() as u32
+    };
+    let availability =
+        traps.iter().map(|trap| trap.availability()).sum::<u32>() / RareTraps::TRAPS as u32;
+    let by_availability = budget_for((availability as f64).ln());
+    let by_parent_visits = budget_for((node.visits() as f64).ln());
+    assert!(
+        by_availability < by_parent_visits,
+        "the two denominators predict the same {by_availability} selections a trap, so \
+         this fixture cannot tell them apart"
+    );
+
+    let spent = traps.iter().map(|trap| trap.visits()).max().unwrap_or(0);
+    assert!(
+        spent < by_parent_visits,
+        "the search spent {spent} selections on a trap legal one world in {}, which is \
+         what `ln(parent visits)` = {by_parent_visits} buys rather than what the trap's \
+         own {availability} opportunities = {by_availability} do",
+        RareTraps::PERIOD
+    );
+    assert!(
+        spent <= by_availability,
+        "the search spent {spent} selections on a trap against the {by_availability} its \
+         own availability predicts"
+    );
+}
+
+/// A cancellation flag and the countdown that trips it, handed to the search as
+/// one context.
+///
+/// [`Searcher::search`] takes the flag by reference and polls it once an
+/// iteration, so a test that wants it set *during* a search needs something
+/// inside the loop to set it. `determinize_into` runs once an iteration, right
+/// after the poll, which makes the arithmetic exact: the determinization that
+/// empties the fuse is the last one, and the poll at the top of the next
+/// iteration is what breaks.
+struct Fuse {
+    left: std::sync::atomic::AtomicU32,
+    cancel: std::sync::atomic::AtomicBool,
+}
+
+impl Fuse {
+    fn new(iterations: u32) -> Self {
+        Self {
+            left: std::sync::atomic::AtomicU32::new(iterations),
+            cancel: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+/// Three plies of three choices and nothing else, over a [`Fuse`] context.
+#[derive(Clone)]
+struct Countdown {
+    ply: u32,
+}
+
+impl mcts::Game for Countdown {
+    type Choice = usize;
+    type Rewards = [f64; 2];
+    type Context = Fuse;
+    type Side = ();
+
+    fn status(&self, _: &Fuse) -> mcts::Status<[f64; 2]> {
+        if self.ply >= 3 {
+            mcts::Status::Terminal([0.5, 0.5])
+        } else {
+            mcts::Status::Active { player: 0 }
+        }
+    }
+
+    fn choices_into(&self, _: &Fuse, out: &mut Vec<usize>) {
+        out.extend([0, 1, 2]);
+    }
+
+    fn apply_choice<R: mcts::rand_core::Rng + ?Sized>(&mut self, _: &Fuse, _: &usize, _: &mut R) {
+        self.ply += 1;
+    }
+
+    fn rollout<R: mcts::rand_core::Rng + ?Sized>(&mut self, _: &Fuse, _: &mut R) -> [f64; 2] {
+        self.ply = 3;
+        [0.5, 0.5]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: mcts::rand_core::Rng + ?Sized>(
+        &self,
+        dest: &mut Self,
+        fuse: &Fuse,
+        _: u8,
+        _: &mut R,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        dest.clone_from(self);
+        if fuse
+            .left
+            .fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
+            .is_ok_and(|left| left == 1)
+        {
+            fuse.cancel.store(true, Relaxed);
+        }
+    }
+}
+
+/// The cancellation flag is one of the three budget kinds `lib.rs` sells, and
+/// every `search` call in this suite used to pass `None` for it —
+/// [`StopReason::Cancelled`] was unreachable from the tests.
+///
+/// The flag is polled at the top of the iteration, so a flag set by the
+/// `CUTOFF`-th determinization stops the search at exactly `CUTOFF` iterations,
+/// with the whole of a 5 000-iteration budget still unspent.
+#[test]
+fn a_cancellation_flag_cuts_the_budget_short() {
+    const CUTOFF: u32 = 25;
+    const BUDGET: u32 = 5_000;
+
+    let fuse = Fuse::new(CUTOFF);
+    let game = Countdown { ply: 0 };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(
+        &game,
+        &fuse,
+        0,
+        &config(BUDGET),
+        Some(&fuse.cancel),
+        &mut rng(3),
+    );
+
+    assert_eq!(result.stop_reason, StopReason::Cancelled);
+    assert_eq!(
+        result.iterations_used, CUTOFF,
+        "the flag was set by determinization {CUTOFF} and the poll that reads it is the \
+         next iteration's first act"
+    );
+    assert_eq!(result.root_visits, CUTOFF);
+    assert!(
+        (0..3).contains(&result.choice),
+        "a cancelled search still answers with a legal move, not {}",
+        result.choice
+    );
+}
+
+/// A flag already set completes no iterations at all, which is the exit that
+/// leaves the root with no visited child: the answer is then a draw from the
+/// position's own choice list rather than a reading of a tree that does not
+/// exist.
+#[test]
+fn a_search_cancelled_before_it_starts_still_answers_legally() {
+    let fuse = Fuse::new(u32::MAX);
+    fuse.cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let game = Countdown { ply: 0 };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(
+        &game,
+        &fuse,
+        0,
+        &config(5_000),
+        Some(&fuse.cancel),
+        &mut rng(3),
+    );
+
+    assert_eq!(result.stop_reason, StopReason::Cancelled);
+    assert_eq!(result.iterations_used, 0);
+    assert_eq!(result.root_visits, 0);
+    assert_eq!(result.best_visits, 0);
+    assert!(
+        (0..3).contains(&result.choice),
+        "a search that ran no iterations answered {}, which is not one of this \
+         position's choices",
+        result.choice
+    );
+}
+
+/// A wall-clock budget is the other half of `Config`'s documented pair, and
+/// nothing in this suite ever set one: `time_limit_ms` and
+/// [`StopReason::Deadline`] were unreachable from the tests.
+///
+/// The iteration budget is set far higher than the deadline can reach, so the
+/// clock is what stops the search — and a build with the deadline check removed
+/// fails this by running the whole of it rather than by hanging.
+#[cfg(feature = "time")]
+#[test]
+fn a_wall_clock_budget_stops_the_search() {
+    const BUDGET: u32 = 2_000_000;
+
+    let fuse = Fuse::new(u32::MAX);
+    let game = Countdown { ply: 0 };
+    let cfg = Config {
+        time_limit_ms: Some(20),
+        ..config(BUDGET)
+    };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &fuse, 0, &cfg, None, &mut rng(3));
+
+    assert_eq!(result.stop_reason, StopReason::Deadline);
+    assert!(
+        result.iterations_used > 0,
+        "the search stopped before its first iteration, so it measured no clock"
+    );
+    assert!(
+        result.iterations_used < BUDGET,
+        "the search spent its whole {BUDGET}-iteration budget, so the deadline never \
+         stopped anything"
+    );
+}
+
+/// A deadline already in the past is the deterministic half of the same knob:
+/// the clock is read before the first determinization, so the search completes
+/// no iterations and still answers with a move this position holds.
+///
+/// `iterations: 0` is the configuration `Config::iterations`' doc points at with
+/// "zero means run until `time_limit_ms` expires", which leaves the clock as the
+/// only thing that can end this loop. The fuse is passed as a watchdog for
+/// exactly that reason: a build with the deadline check removed then reports
+/// `Cancelled` after 100 000 iterations and fails these assertions, instead of
+/// running until someone kills it.
+#[cfg(feature = "time")]
+#[test]
+fn a_deadline_already_past_completes_no_iterations() {
+    let fuse = Fuse::new(100_000);
+    let game = Countdown { ply: 0 };
+    let cfg = Config {
+        time_limit_ms: Some(0),
+        ..config(0)
+    };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &fuse, 0, &cfg, Some(&fuse.cancel), &mut rng(3));
+
+    assert_eq!(result.stop_reason, StopReason::Deadline);
+    assert_eq!(result.iterations_used, 0);
+    assert_eq!(result.root_visits, 0);
+    assert!(
+        (0..3).contains(&result.choice),
+        "a search that ran no iterations answered {}, which is not one of this \
+         position's choices",
+        result.choice
+    );
+}
+
+/// Every worker's tree is re-rooted, not merely one of them.
+///
+/// [`mcts::RootParallel::reuse_subtree`] is a loop over the workers, and nothing
+/// in this suite ever read the result of it: an empty body, or one that re-roots
+/// worker 0 and returns, left the whole suite green. `reused_iterations` cannot
+/// catch either — it is one merged scalar, so a single worker carrying its
+/// subtree forward already makes it positive — so the claim is asserted where it
+/// is made, per tree, against the visits each worker held for that move before
+/// the call.
+#[cfg(feature = "parallel")]
+#[test]
+fn pooled_reuse_re_roots_every_worker() {
+    use mcts::RootParallel;
+
+    const THREADS: usize = 4;
+    const BUDGET: u32 = 300;
+
+    let mut game = three_plies();
+    let mut pool = RootParallel::new(THREADS, &game, |worker| rng(worker as u64 + 1));
+    let first = pool.search(&game, &(), 0, &config(BUDGET), None);
+
+    let carried: Vec<u32> = pool
+        .trees()
+        .map(|root| {
+            root.children()
+                .iter()
+                .find(|child| child.edge().choice() == Some(&first.choice))
+                .map_or(0, |child| child.visits())
+        })
+        .collect();
+    assert_eq!(carried.len(), THREADS, "a worker finished without a tree");
+    assert!(
+        carried.iter().all(|&visits| visits > 0),
+        "the workers hold {carried:?} visits for the merged answer, so at least one of \
+         them has nothing to carry forward and re-rooting it is unobservable"
+    );
+
+    pool.reuse_subtree(&first.choice);
+    let rooted: Vec<u32> = pool.trees().map(|root| root.visits()).collect();
+    assert_eq!(
+        rooted, carried,
+        "after re-rooting, each worker's root should be the subtree it held for the \
+         answer; the pool holds {rooted:?} against the {carried:?} its workers had"
+    );
+
+    game.apply(&first.choice);
+    let second = pool.search(&game, &(), 0, &config(BUDGET), None);
+    assert_eq!(
+        second.reused_iterations,
+        carried.iter().sum::<u32>(),
+        "the merged reuse count is every worker's, not one worker's"
+    );
+    for (worker, root) in pool.trees().enumerate() {
+        assert_eq!(
+            root.visits(),
+            BUDGET,
+            "worker {worker} reached {} of the {BUDGET} visits the budget asks for, \
+             counting the ones it inherited",
+            root.visits()
+        );
+    }
+}
+
+/// Two plies of ten choices, searched by a pool: wide enough that the workers'
+/// seeds send them down different children, which is what lets one named worker
+/// be given a budget it has already met.
+#[cfg(feature = "parallel")]
+const POOL_WIDTH: usize = 10;
+#[cfg(feature = "parallel")]
+const POOL_THREADS: usize = 4;
+
+/// A pool that has searched once and re-rooted every worker at `choice`,
+/// returned with the position it re-rooted into and the visits each worker
+/// carried across.
+///
+/// A search whose budget is that carry is over before the worker holding it
+/// runs an iteration — `root.visits >= target` is the first thing the loop
+/// asks, ahead of the cancellation flag and the clock — so a budget set to one
+/// worker's carry stops that worker for [`StopReason::Budget`] and leaves every
+/// other worker to stop for whatever the caller passed in.
+#[cfg(feature = "parallel")]
+fn pool_carrying(choice: usize) -> (mcts::RootParallel<GameTree, WyRand>, GameTree, Vec<u32>) {
+    const FIRST: u32 = 200;
+
+    let mut game = GameTree::wide_two_ply(POOL_WIDTH);
+    let mut pool = mcts::RootParallel::new(POOL_THREADS, &game, |worker| rng(worker as u64 + 1));
+    pool.search(&game, &(), 0, &config(FIRST), None);
+    let carried: Vec<u32> = pool
+        .trees()
+        .map(|root| {
+            root.children()
+                .iter()
+                .find(|child| child.edge().choice() == Some(&choice))
+                .map_or(0, |child| child.visits())
+        })
+        .collect();
+    pool.reuse_subtree(&choice);
+    game.apply(&choice);
+    (pool, game, carried)
+}
+
+/// A root choice `worker` carried as much of as any worker did, and at least
+/// one worker carried less of — so a budget of that carry stops `worker` for
+/// [`StopReason::Budget`] and leaves somebody else to stop for the caller's
+/// flag or clock.
+#[cfg(feature = "parallel")]
+fn budget_carried_by(worker: usize) -> (usize, u32) {
+    (0..POOL_WIDTH)
+        .find_map(|choice| {
+            let carried = pool_carrying(choice).2;
+            let mine = carried[worker];
+            let short = carried.iter().any(|&visits| visits < mine);
+            (mine > 1 && short && carried.iter().all(|&visits| visits <= mine))
+                .then_some((choice, mine))
+        })
+        .unwrap_or_else(|| {
+            panic!("no root choice of {POOL_WIDTH} leaves worker {worker} carrying the most")
+        })
+}
+
+/// A pooled search reports the most informative reason any worker stopped for.
+///
+/// Every `search` call in this suite passed `None` for `cancel` and set no
+/// `time_limit_ms`, pooled ones included, so `merged_stop_reason`'s `Cancelled`
+/// and `Deadline` arms were unreachable: a pool answering `Budget` for a
+/// cancelled run would have shipped unnoticed.
+///
+/// A pool whose workers all stop for the same reason cannot see a ranking at
+/// all — `max_by_key` keeps the last maximum, so ranking `Cancelled` level with
+/// `Budget` still answers `Cancelled` when every worker said `Cancelled`. So one
+/// worker is stopped for `Budget` instead, and which one it is decides what the
+/// case pins: with it last, a merge that has stopped ranking the flag above the
+/// budget answers `Budget`, and with it first, so does a merge that copies
+/// worker 0's reason out.
+#[cfg(feature = "parallel")]
+#[test]
+fn a_pooled_search_reports_the_cancellation_a_worker_stopped_for() {
+    use std::sync::atomic::AtomicBool;
+
+    for worker in [POOL_THREADS - 1, 0] {
+        let (choice, target) = budget_carried_by(worker);
+        let (mut pool, game, carried) = pool_carrying(choice);
+        let cancel = AtomicBool::new(true);
+        let result = pool.search(&game, &(), 0, &config(target), Some(&cancel));
+
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Cancelled,
+            "worker {worker} carried the whole {target}-visit budget and stopped for it, \
+             but the workers that carried less of {choice} stopped for the flag"
+        );
+        assert_eq!(
+            result.iterations_used, 0,
+            "a flag set before the search leaves every worker nothing to do"
+        );
+        assert_eq!(
+            result.reused_iterations,
+            carried.iter().sum::<u32>(),
+            "the merged reuse count is every worker's carry, {carried:?}"
+        );
+        assert!(
+            result.choice < POOL_WIDTH,
+            "the pool answered {}, which this position does not offer",
+            result.choice
+        );
+    }
+}
+
+/// The clock's half of the same claim, and the same construction: one worker's
+/// budget is already met, so it stops for `Budget` while the rest read a
+/// deadline that has already passed.
+#[cfg(all(feature = "parallel", feature = "time"))]
+#[test]
+fn a_pooled_search_reports_the_deadline_a_worker_stopped_for() {
+    for worker in [POOL_THREADS - 1, 0] {
+        let (choice, target) = budget_carried_by(worker);
+        let (mut pool, game, _) = pool_carrying(choice);
+        let cfg = Config {
+            time_limit_ms: Some(0),
+            ..config(target)
+        };
+        let result = pool.search(&game, &(), 0, &cfg, None);
+
+        assert_eq!(
+            result.stop_reason,
+            StopReason::Deadline,
+            "worker {worker} stopped for its budget and the rest for the clock"
+        );
+        assert_eq!(result.iterations_used, 0);
+    }
 }

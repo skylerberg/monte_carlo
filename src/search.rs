@@ -125,14 +125,25 @@ pub struct Config {
     /// both, at every budget, with no other symptom. Under
     /// [`crate::SimultaneousPolicy::Duct`] nothing is clamped and the width of
     /// the range is instead the scale of decoupled UCB1's **tie tolerance**:
-    /// arms within 1% of it of the leading arm are drawn between uniformly. A
-    /// range declared much wider than the payoffs is harmless everywhere else —
-    /// it only makes the clamp looser — but it widens that tolerance until
+    /// arms within 1% of it of the leading arm are drawn between uniformly, so a
+    /// range declared much wider than the payoffs widens that tolerance until
     /// every visited arm is inside it, at which point `Duct` selection is a
     /// uniform random move picker. Measured on a two-arm game with a strictly
     /// dominant row and payoffs in `[0, 1]`: 0.999 of the arm visits on the
     /// dominant row at `max_reward = 1`, and 0.506 — chance — at
     /// `max_reward = 200`.
+    ///
+    /// Over-declaring is not free under regret matching either, and the two
+    /// bounds do not cost the same there. Its strategy is invariant under a
+    /// positive rescaling of every regret, so the *width* on its own changes
+    /// nothing; the *floor* does, because `min_reward` is subtracted from every
+    /// payoff while backup adds the played arm's share back divided by the
+    /// probability it was played with — a common term that cancels only in
+    /// expectation, and is a random walk on every regret until it does.
+    /// Measured on biased rock-paper-scissors at 20 000 iterations over eight
+    /// seeds: mean exploitability 0.013 against the game's own `[0, 1]`,
+    /// identical to the last bit against `[0, 4]`, and 0.105 against
+    /// `[-10, 11]` — worse than the 0.083 of not searching at all.
     ///
     /// Rescaling a game's payoffs, this range and
     /// [`SimultaneousConfig::duct_exploration`] together leaves `Duct` search

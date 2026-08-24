@@ -382,3 +382,88 @@ impl Game for PriorTrap {
         dest.clone_from(self);
     }
 }
+
+/// Leaf payoffs of [`RotatingThree`], indexed by the three choices read as a
+/// binary number with player 0's choice as the high bit.
+///
+/// No two entries of a row are equal, which is the property the fixture exists
+/// for: a leaf that accumulates some other player's reward accumulates a
+/// different number, whichever other player it is.
+pub const ROTATING_PAYOFFS: [[f64; 3]; 8] = [
+    [0.10, 0.20, 0.30],
+    [0.20, 0.40, 0.60],
+    [0.30, 0.60, 0.90],
+    [0.40, 0.10, 0.70],
+    [0.50, 0.30, 0.10],
+    [0.60, 0.90, 0.20],
+    [0.70, 0.50, 0.40],
+    [0.80, 0.70, 0.50],
+];
+
+/// Players 0, 1 and 2 move once each in that order, one binary choice apiece.
+///
+/// The only sequential fixture here with a third player, and it is here for one
+/// claim the crate makes and nothing checked: `max^n` backup credits a node with
+/// `rewards.reward(node.player)`, the reward of the player who moved into it.
+/// On a two-player game that is indistinguishable from crediting
+/// `reward(node.player.min(1))` — and every other sequential fixture in this
+/// file is two-player. A leaf here is stamped for player 2 and pays all three
+/// players differently, so the wrong player's reward is visible in the leaf's
+/// own accumulator.
+#[derive(Clone)]
+pub struct RotatingThree {
+    path: usize,
+    ply: u32,
+}
+
+impl RotatingThree {
+    /// Which player a node at `depth` accumulates for: the root the player to
+    /// act, and every other node the player who moved into it.
+    pub const PLAYER_AT_DEPTH: [u8; 4] = [0, 0, 1, 2];
+
+    pub fn new() -> Self {
+        Self { path: 0, ply: 0 }
+    }
+}
+
+impl Game for RotatingThree {
+    type Choice = usize;
+    type Rewards = [f64; 3];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> Status<[f64; 3]> {
+        if self.ply >= 3 {
+            Status::Terminal(ROTATING_PAYOFFS[self.path])
+        } else {
+            Status::Active {
+                player: self.ply as u8,
+            }
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+        out.extend([0, 1]);
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), choice: &usize, _: &mut R) {
+        self.path = self.path << 1 | *choice;
+        self.ply += 1;
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 3] {
+        while self.ply < 3 {
+            let choice = (rng.next_u64() & 1) as usize;
+            self.apply_choice(&(), &choice, rng);
+        }
+        ROTATING_PAYOFFS[self.path]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}

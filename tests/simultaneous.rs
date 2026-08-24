@@ -1181,6 +1181,112 @@ fn a_game_paying_its_declared_maximum_is_in_range() {
     Searcher::new(&game).search(&game, &(), 0, &cfg, None, &mut rng(1));
 }
 
+/// `Duct` measures its tie tolerance against the width of the declared reward
+/// range, and against nothing else — so a range declared much wider than the
+/// payoffs really are widens the pool of "tied" arms until decoupled UCB1 is a
+/// uniform random move picker.
+///
+/// This is the documented measurement in [`Config::max_reward`], as a test: on a
+/// game with a strictly dominant row and payoffs in `[0, 1]`, 0.999 of the arm
+/// visits land on the dominant action at `max_reward = 1` and 0.506 — chance —
+/// at `max_reward = 200`. Nothing else in the config moves between the two runs.
+#[test]
+fn a_range_declared_wider_than_the_payoffs_makes_duct_draw_at_random() {
+    let game = Ducted(DominantPair::default());
+    let concentration = |max_reward: f64| {
+        let cfg = Config {
+            max_reward,
+            ..config(20_000)
+        };
+        let mut searcher = Searcher::new(&game);
+        searcher.search(&game, &(), 0, &cfg, None, &mut rng(5));
+        let marginals = searcher
+            .tree()
+            .expect("the search retained its tree")
+            .marginals(0)
+            .expect("player 0 acts at the root");
+        let visits: Vec<u32> = (0..marginals.len())
+            .map(|arm| marginals.visits(arm))
+            .collect();
+        f64::from(*visits.iter().max().expect("some arm was selected"))
+            / f64::from(visits.iter().sum::<u32>())
+    };
+
+    let declared = concentration(1.0);
+    assert!(
+        declared > 0.9,
+        "Duct gives the dominant action {declared} of the arm visits at the game's own \
+         reward range, which is not the concentration a pure equilibrium produces"
+    );
+    let over_declared = concentration(200.0);
+    assert!(
+        over_declared < 0.6,
+        "Duct still concentrates {over_declared} on the dominant action against a range \
+         two hundred times the payoffs, so the tie tolerance is not reading the range"
+    );
+}
+
+/// What the declared range does to regret matching: nothing at all through its
+/// *width*, and a great deal through its *floor*.
+///
+/// Regret matching's strategy is invariant under any positive rescaling of every
+/// regret, so declaring `[0, 4]` for a game paying in `[0, 1]` divides every
+/// normalized payoff by four and changes not one draw — asserted here as exact
+/// equality, because the scale is a power of two and the arithmetic is therefore
+/// exact. What is *not* invariant is the offset: `normalize_reward` subtracts
+/// `min_reward`, and backup adds the played arm's share back divided by the
+/// probability it was played with, so a floor declared far below the game's real
+/// minimum leaves a common term that cancels only in expectation and is a random
+/// walk on every regret in the meantime.
+///
+/// Measured over eight seeds at 20 000 iterations on [`BiasedRps`], whose
+/// equilibrium is known exactly: mean exploitability 0.013 against the game's own
+/// `[0, 1]`, and 0.105 against `[-10, 11]` — worse than the 0.083 of not
+/// searching at all.
+#[test]
+fn regret_matching_reads_the_declared_range_as_a_scale_and_as_a_floor() {
+    const SEEDS: u64 = 8;
+
+    let game = BiasedRps::default();
+    let mix = |min_reward: f64, max_reward: f64, seed: u64| {
+        let cfg = Config {
+            min_reward,
+            max_reward,
+            ..config(20_000)
+        };
+        mixture(&game, 0, &cfg, seed)
+    };
+    let mean_exploitability = |min_reward: f64, max_reward: f64| {
+        (1..=SEEDS)
+            .map(|seed| biased_rps_exploitability(&mix(min_reward, max_reward, seed), 0))
+            .sum::<f64>()
+            / SEEDS as f64
+    };
+
+    for seed in 1..=SEEDS {
+        assert_eq!(
+            mix(0.0, 4.0, seed),
+            mix(0.0, 1.0, seed),
+            "seed {seed}: rescaling the declared range moved a regret-matching strategy"
+        );
+    }
+
+    let declared = mean_exploitability(0.0, 1.0);
+    let uniform = biased_rps_exploitability(&[1.0 / 3.0; 3], 0);
+    assert!(
+        declared < uniform / 2.0,
+        "regret matching is exploitable for {declared} against the game's own reward \
+         range, which is not better than half of uniform play's {uniform}"
+    );
+    let under_declared = mean_exploitability(-10.0, 11.0);
+    assert!(
+        under_declared > uniform,
+        "a floor ten times the game's own payoffs below its real minimum costs regret \
+         matching only {under_declared} against uniform play's {uniform}, so the offset \
+         `normalize_reward` subtracts is not reaching the regrets"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 7.5 Determinism
 // ---------------------------------------------------------------------------
