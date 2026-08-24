@@ -208,6 +208,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly its declared maximum was accused of the defect the assertion exists to
   report — roughly one arbitrary range in twenty, plain two-decimal ones
   included.
+* **The example runs in a debug build.** `cargo run --example tic_tac_toe` died
+  on its first `status()` call with "attempt to subtract with overflow", before
+  printing a line. `winner` closed each line with `then_some(first - 1)`, and
+  `bool::then_some` takes its argument by value — evaluated before the flag is
+  looked at — so an empty board computed `0u8 - 1`. A release build
+  wrapped it to 255 and threw the value away, which is the build the example's
+  own instructions and the README named — the crate shipped a sample nothing
+  could run as written. It is `then(|| first - 1)` now, the example carries a
+  unit test that fails in any build with overflow checks on, and CI runs the
+  binary itself in the dev profile.
+* **The example prints a value rather than a "win rate".** It labelled
+  `best_mean_reward` that way, and on a game paying 1.0 for a win and 0.5 for a
+  draw it is an expected score: `win rate 0.500` at a dead-drawn position, and
+  `win rate 0.000` on the last forced move, where the zero is the placeholder
+  `StopReason::SingleChoice` returns without running an iteration rather than
+  anything measured. Forced moves now say `forced` and the rest say `value`.
+* **The one code sample the crate ships compiles and runs.** It called
+  `state.apply(&result.choice)`; there is no `apply`, the method is
+  `apply_choice(ctx, choice, rng)`. The rustdoc copy carried an `ignore` fence —
+  the only one in `src/` — and the README is never `include_str!`d, so nothing
+  compiled either copy and the sample rotted through two releases. The
+  crate-docs copy is a real doctest now, over a small hidden `Game`, so
+  `cargo test` fails if those four lines stop compiling; the README carries the
+  same four lines.
+* **Three doc sites over-claimed the ISMCTS exploration rule.** The crate docs,
+  the README and `Marginals::availability` stated the availability denominator
+  unqualified, while `select` scores a *root's* children against the root's own
+  visit count and only the levels below it against their availability. The code
+  is right and deliberate — nothing maintains `ln_availability` on a root child,
+  and the root's own ranking is where availability divides — so the three claims
+  are qualified and `select` records the coupling rather than inviting a fix.
+* **`Marginals::policy_into`'s masking recipe no longer divides by zero.** It
+  told a caller holding a narrower legal set to zero the illegal entries and
+  renormalize, and said `Searcher::root_policy_into` "does that for you". Under
+  `SimultaneousPolicy::Duct` the vector is one-hot at the leader over every arm
+  the tree holds, so an illegal leader leaves `[0, 0, 0]` to be normalized by
+  0.0 — and `root_policy_into` is not that rescaling: it recomputes the leader
+  over the legal arms and can name a different action. Both docs now say so, and
+  `Marginals::policy_masked_into` is the extraction to reach for.
+* **The budget list no longer promises a cancel-flag-only budget.** The crate
+  docs and the README listed a cancellation flag as one of three budgets, and
+  `Searcher::search` refuses a config carrying neither an iteration count nor a
+  time limit: the flag is polled inside a loop that a budget has to start, so it
+  cuts a budget short rather than being one. Both lists say that now, and
+  `Config::iterations` documents `u32::MAX` as the run-until-cancelled spelling
+  together with what it costs — `early_termination` compares the iterations left
+  against the evidence bar, so against that budget it never fires.
+* **`Game::Choice`'s `Eq` is documented as full value identity.** The tree
+  stores the first `Choice` it ever saw for an edge and thereafter replays *that
+  value* into `apply_choice` / `apply_joint` and hands it back as
+  `SearchResult::choice`. A lawful but coarser `Eq` — one ignoring data the
+  choice carries, such as the determinization it was built for — therefore feeds
+  one world's data into another world's state and into the caller's answer, with
+  nothing to catch it. It is now a stated precondition rather than an
+  implementation detail.
 
 ### Performance
 
@@ -256,6 +311,17 @@ byte-identical and node counts are bit-identical in every configuration.
 
 ### Added
 
+* **`Marginals::policy_masked_into`.** This player's strategy restricted to the
+  arms legal in the real position and normalized over them, with the mask
+  supplied by the caller. `Searcher::root_policy_into` is the same extraction at
+  a root, where the searcher can enumerate the mask itself; below a root this is
+  the only sound one, because rescaling `Marginals::policy_into` afterwards
+  normalizes a vector of zeros whenever `Duct`'s leading arm is one the position
+  does not offer. "The same extraction" is literal: the root form, the sampled
+  form, the deterministic form and this one all run `duct::strategy_into` over
+  the same arm slices, and `Marginals::leader` is `duct`'s root ranking rather
+  than a second spelling of it, so the guarantee `root_weight` was written to
+  give — that these forms cannot drift apart — now covers the marginal view too.
 * `Game::advance` and `Game::determinize_into` document the root contract: an
   `advance` at the root may resolve decisions the tree does not model, but not
   the one being searched, and a determinization may change what is legal but not

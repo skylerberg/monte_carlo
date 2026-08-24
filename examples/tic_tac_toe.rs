@@ -4,10 +4,12 @@
 //! hidden information and side models stay at their defaults: `Context` and
 //! `Side` are `()`, and `determinize_into` is a plain copy.
 //!
-//! Run with `cargo run --release --example tic_tac_toe`.
+//! Run with `cargo run --example tic_tac_toe`. `--release` plays the same game
+//! faster; the dev profile is what CI runs, since that is where an arithmetic
+//! overflow in a game is reported rather than wrapped.
 
 use mcts::rand_core::{Rng, SeedableRng};
-use mcts::{Config, Game, Searcher, Status};
+use mcts::{Config, Game, Searcher, Status, StopReason};
 use wyrand::WyRand;
 
 const LINES: [[usize; 3]; 8] = [
@@ -39,7 +41,10 @@ impl TicTacToe {
     fn winner(&self) -> Option<u8> {
         LINES.iter().find_map(|line| {
             let first = self.cells[line[0]];
-            (first != 0 && line.iter().all(|&i| self.cells[i] == first)).then_some(first - 1)
+            // `then`, not `then_some`: the latter takes its argument by value,
+            // so `first - 1` would be evaluated on every line of an empty board
+            // and underflow at `first == 0`.
+            (first != 0 && line.iter().all(|&i| self.cells[i] == first)).then(|| first - 1)
         })
     }
 
@@ -146,14 +151,19 @@ fn main() {
     while let Status::Active { player } = game.status(&()) {
         let result = searchers[player as usize].search(&game, &(), player, &config, None, &mut rng);
 
-        println!(
-            "player {player} plays {} after {} iterations ({} reused, {:?}), win rate {:.3}",
-            result.choice,
-            result.iterations_used,
-            result.reused_iterations,
-            result.stop_reason,
-            result.best_mean_reward,
+        print!(
+            "player {player} plays {} after {} iterations ({} reused, {:?})",
+            result.choice, result.iterations_used, result.reused_iterations, result.stop_reason,
         );
+        // An expected score on this game's own scale — 1.0 for a win, 0.5 for a
+        // draw — and not a win rate. A forced move reports the hardcoded 0.0
+        // that `StopReason::SingleChoice` returns without running an iteration,
+        // so there is no value to print at all.
+        if result.stop_reason == StopReason::SingleChoice {
+            println!(", forced");
+        } else {
+            println!(", value {:.3}", result.best_mean_reward);
+        }
 
         game.play(result.choice);
         for searcher in &mut searchers {
@@ -165,5 +175,19 @@ fn main() {
     match game.winner() {
         Some(winner) => println!("player {winner} wins"),
         None => println!("draw, as it should be"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first thing `main` does is ask an empty board for its status, and
+    /// every build with overflow checks used to die there.
+    #[test]
+    fn an_empty_board_has_no_winner() {
+        let game = TicTacToe::new();
+        assert_eq!(game.winner(), None);
+        assert!(matches!(game.status(&()), Status::Active { player: 0 }));
     }
 }

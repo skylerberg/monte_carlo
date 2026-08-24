@@ -1,10 +1,10 @@
 //! Selection and credit at simultaneous nodes.
 //!
 //! Nothing in this module is reachable from a game that never reports
-//! [`crate::Status::Simultaneous`]: every entry point takes a `Simul<C>`, and a
-//! node only grows one after reporting it. `select` and the sequential half of
-//! backup are untouched, which is what keeps sequential codegen — and the
-//! `tiny/100k` bench — exactly what it was.
+//! [`crate::Status::Simultaneous`]: every entry point takes a `Simul<C>` or the
+//! arm slices one owns, and a node only grows those after reporting it.
+//! `select` and the sequential half of backup are untouched, which is what
+//! keeps sequential codegen — and the `tiny/100k` bench — exactly what it was.
 //!
 //! The two policies differ in one place only, and it is not the arm statistics:
 //! [`SimultaneousPolicy::Duct`] scores arms and plays the argmax, so its
@@ -23,7 +23,7 @@
 use rand_core::Rng;
 
 use crate::game::{Rewards, SimultaneousPolicy};
-use crate::node::{JointKey, Simul};
+use crate::node::{ArmPolicy, ArmStats, JointKey, Simul};
 use crate::rank::{leader_of, Candidate};
 use crate::select::ucb_raw;
 use crate::util::{below, uniform_01};
@@ -530,22 +530,38 @@ pub(crate) fn root_strategy_into<C>(
     policy: SimultaneousPolicy,
     out: &mut Vec<f64>,
 ) {
+    let (stats, arm_policy) = slot_arms(simul, slot);
+    strategy_into(stats, arm_policy, Some(legal), policy.mixes(), out);
+}
+
+/// [`root_strategy_into`] over one slot's arms themselves, so that
+/// [`crate::Marginals`] — which holds those slices and no `Simul` — extracts
+/// through this body instead of through a second copy of it.
+///
+/// `legal` of `None` treats every arm as legal, which is
+/// [`crate::Marginals::policy_into`]: the same rule with nothing masked out.
+pub(crate) fn strategy_into(
+    stats: &[ArmStats],
+    arm_policy: &[ArmPolicy],
+    legal: Option<&[bool]>,
+    mixes: bool,
+    out: &mut Vec<f64>,
+) {
     out.clear();
-    let arms = simul.slot_len(slot);
-    debug_assert_eq!(
-        legal.len(),
-        arms,
+    debug_assert!(
+        legal.is_none_or(|legal| legal.len() == stats.len()),
         "mcts: the legality mask and the participant's arms are out of step"
     );
-    if arms == 0 {
+    if stats.is_empty() {
         return;
     }
+    let is_legal = |arm: usize| legal.is_none_or(|legal| legal[arm]);
 
-    let one_hot = duct_target(simul, slot, legal, policy);
+    let one_hot = pure_target(stats, legal, mixes);
     let mut total = 0.0;
-    for (arm, &is_legal) in legal.iter().enumerate().take(arms) {
-        let weight = if is_legal {
-            root_weight(simul, slot, arm, policy, one_hot)
+    for arm in 0..stats.len() {
+        let weight = if is_legal(arm) {
+            weight_of(stats, arm_policy, arm, mixes, one_hot)
         } else {
             0.0
         };
@@ -560,18 +576,27 @@ pub(crate) fn root_strategy_into<C>(
         return;
     }
 
-    let count = legal
-        .iter()
-        .take(arms)
-        .filter(|&&is_legal| is_legal)
-        .count();
+    let count = (0..stats.len()).filter(|&arm| is_legal(arm)).count();
     if count == 0 {
         return;
     }
     let share = 1.0 / count as f64;
-    for (weight, &is_legal) in out.iter_mut().zip(legal) {
-        *weight = if is_legal { share } else { 0.0 };
+    for (arm, weight) in out.iter_mut().enumerate() {
+        *weight = if is_legal(arm) { share } else { 0.0 };
     }
+}
+
+/// One slot's arm statistics and policy state. The policy slice is empty under
+/// a policy that allocates none, and is otherwise index-parallel to the stats.
+#[inline]
+fn slot_arms<C>(simul: &Simul<C>, slot: usize) -> (&[ArmStats], &[ArmPolicy]) {
+    let range = simul.slot_range(slot);
+    let arm_policy = if simul.arm_policy.is_empty() {
+        &[][..]
+    } else {
+        &simul.arm_policy[range.clone()]
+    };
+    (&simul.arm_stats[range], arm_policy)
 }
 
 /// Draw one of `slot`'s legal arms from the same strategy
@@ -702,14 +727,19 @@ pub(crate) fn best_arm<C>(
 /// [`best_arm`] and not this is what a root move is read off. `None` if nothing
 /// legal has been selected yet.
 fn leading_arm<C>(simul: &Simul<C>, slot: usize, legal: &[bool]) -> Option<usize> {
-    let start = simul.starts[slot] as usize;
+    leader_over(&simul.arm_stats[simul.slot_range(slot)], Some(legal))
+}
+
+/// [`leading_arm`] over one slot's arms themselves, for the same reason
+/// [`strategy_into`] exists: [`crate::Marginals::leader`] is this ranking and
+/// must not become a second spelling of it. `legal` of `None` ranks every arm.
+pub(crate) fn leader_over(stats: &[ArmStats], legal: Option<&[bool]>) -> Option<usize> {
     leader_of(
-        legal
+        stats
             .iter()
             .enumerate()
-            .filter(|(_, &is_legal)| is_legal)
-            .map(|(arm, _)| {
-                let stats = &simul.arm_stats[start + arm];
+            .filter(|(arm, _)| legal.is_none_or(|legal| legal[*arm]))
+            .map(|(arm, stats)| {
                 (
                     arm,
                     Candidate::new(stats.visits, stats.availability, stats.cumulative_reward),
@@ -728,14 +758,26 @@ fn duct_target<C>(
     legal: &[bool],
     policy: SimultaneousPolicy,
 ) -> Option<usize> {
-    match policy {
-        SimultaneousPolicy::Duct => leading_arm(simul, slot, legal),
-        SimultaneousPolicy::RegretMatching => None,
+    pure_target(
+        &simul.arm_stats[simul.slot_range(slot)],
+        Some(legal),
+        policy.mixes(),
+    )
+}
+
+/// [`duct_target`] over the arms themselves.
+#[inline]
+fn pure_target(stats: &[ArmStats], legal: Option<&[bool]>, mixes: bool) -> Option<usize> {
+    if mixes {
+        None
+    } else {
+        leader_over(stats, legal)
     }
 }
 
 /// One arm's unnormalized root weight, so that the vector form, the sampled
-/// form and the deterministic form cannot drift apart.
+/// form, the deterministic form and the masked marginal
+/// [`crate::Marginals::policy_masked_into`] extracts cannot drift apart.
 #[inline]
 fn root_weight<C>(
     simul: &Simul<C>,
@@ -744,19 +786,25 @@ fn root_weight<C>(
     policy: SimultaneousPolicy,
     one_hot: Option<usize>,
 ) -> f64 {
-    match policy {
-        SimultaneousPolicy::RegretMatching => {
-            let at = simul.starts[slot] as usize + arm;
-            simul.arm_policy[at].strategy_sum.max(0.0)
-                / simul.arm_stats[at].availability.max(1) as f64
-        }
-        SimultaneousPolicy::Duct => {
-            if one_hot == Some(arm) {
-                1.0
-            } else {
-                0.0
-            }
-        }
+    let (stats, arm_policy) = slot_arms(simul, slot);
+    weight_of(stats, arm_policy, arm, policy.mixes(), one_hot)
+}
+
+/// [`root_weight`] over the arms themselves.
+#[inline]
+fn weight_of(
+    stats: &[ArmStats],
+    arm_policy: &[ArmPolicy],
+    arm: usize,
+    mixes: bool,
+    one_hot: Option<usize>,
+) -> f64 {
+    if mixes {
+        arm_policy[arm].strategy_sum.max(0.0) / stats[arm].availability.max(1) as f64
+    } else if one_hot == Some(arm) {
+        1.0
+    } else {
+        0.0
     }
 }
 

@@ -1406,6 +1406,63 @@ fn a_parallel_simultaneous_root_returns_an_action_the_player_has() {
     );
 }
 
+/// `Searcher::root_policy_into` and `Marginals::policy_masked_into` are
+/// documented as one extraction and not as two rules that happen to agree, so
+/// something has to hold them to it.
+///
+/// A `Duct` root over [`ForbiddenFavourite`] is the shape where a second copy
+/// would show: the arm leading the whole tree is the one the real position
+/// withholds, which is exactly where re-running the extraction over the legal
+/// arms parts company with masking a finished policy — the latter has nothing
+/// but zeros left to normalize. Below a root `policy_masked_into` is the only
+/// extraction a caller has, so the two must name the same action with the same
+/// mass, entry for entry.
+#[test]
+fn the_masked_marginal_is_the_root_policy() {
+    let game = Ducted(ForbiddenFavourite::banned());
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &config(2_000), None, &mut rng(3));
+
+    let mut pairs = Vec::new();
+    assert!(
+        searcher.root_policy_into(&game, &(), 0, &mut pairs),
+        "player 0 acts at this root and holds legal actions here"
+    );
+
+    let root = searcher.tree().expect("a search leaves a tree");
+    let marginals = root.marginals(0).expect("player 0 acts at this root");
+    let mut legal_actions = Vec::new();
+    game.choices_for_into(&(), 0, &mut legal_actions);
+    let mask: Vec<bool> = (0..marginals.len())
+        .map(|arm| legal_actions.contains(marginals.choice(arm)))
+        .collect();
+
+    let leader = marginals.leader().expect("the search selected some arm");
+    assert_eq!(
+        *marginals.choice(leader),
+        FORBIDDEN_ACTION,
+        "the arm leading the whole tree is one the position offers, so nothing \
+         here is masked away and the test proves nothing: mask {mask:?}"
+    );
+
+    let mut masked = Vec::new();
+    marginals.policy_masked_into(&mask, &mut masked);
+    let expected: Vec<(u8, f64)> = (0..marginals.len())
+        .filter(|&arm| mask[arm])
+        .map(|arm| (*marginals.choice(arm), masked[arm]))
+        .collect();
+    assert_eq!(
+        pairs, expected,
+        "the root policy and the masked marginal are documented as one \
+         extraction, and they disagree"
+    );
+    assert!(
+        pairs.iter().any(|&(_, weight)| weight > 0.0),
+        "an all-zero policy on both sides would make the comparison vacuous: \
+         {pairs:?}"
+    );
+}
+
 /// Early termination must not change the answer — the contract `tests/search.rs`
 /// states for a sequential root, held at a simultaneous one.
 ///

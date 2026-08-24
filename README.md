@@ -16,27 +16,31 @@ Implement `Game`, then drive a `Searcher`:
 let mut searcher = Searcher::new(&state);
 let result = searcher.search(&state, &ctx, player, &config, None, &mut rng);
 
-state.apply(&result.choice);
+state.apply_choice(&ctx, &result.choice, &mut rng);
 searcher.reuse_subtree(&result.choice);   // next search inherits this subtree
 ```
 
+The crate docs run those four lines as a doctest against a small game.
 `examples/tic_tac_toe.rs` is a complete implementation of a perfect-information
-game; run it with `cargo run --release --example tic_tac_toe`.
+game; run it with `cargo run --example tic_tac_toe`.
 
 ## What it does
 
-* **Information Set MCTS** — a fresh determinization per iteration, and an
-  exploration term over how often a choice was *available* rather than how often
-  its parent was visited, so a rarely-legal move is not mistaken for an
-  under-explored one.
+* **Information Set MCTS** — a fresh determinization per iteration, and, below
+  the root, an exploration term over how often a choice was *available* rather
+  than how often its parent was visited, so a rarely-legal move is not mistaken
+  for an under-explored one. The root is the textbook `ln(parent visits)`,
+  deliberately; its own ranking is what divides by availability there.
 * **max^n backup** over per-player reward vectors. Any number of players, any
   reward scale; nothing assumes two players or zero sum.
 * **Simultaneous moves** — one bandit per participant over that player's own
   actions, with regret matching as the default selection rule so that a node
   with a mixed equilibrium is played mixed rather than exploitably. What is
   proved and what is not is spelled out below.
-* **Budgets** by iterations, wall clock, or an external `AtomicBool`, plus early
-  termination once the remaining iterations provably cannot change the answer.
+* **Budgets** by iterations or wall clock — one of the two is required — either
+  of which an external `AtomicBool` can cut short. Plus early termination once
+  the remaining iterations provably cannot change the answer, which an
+  `iterations: u32::MAX` run-until-cancelled budget switches off in practice.
 * **Tree reuse** across moves, and root parallelism behind the `parallel`
   feature.
 * **Progressive bias** from a game-supplied prior, evaluated once per child.

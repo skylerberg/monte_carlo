@@ -52,6 +52,16 @@ pub(crate) fn select<C>(
 ) -> Option<usize> {
     debug_assert_eq!(avail.len(), node.children.len());
 
+    // Textbook UCB1 at the root, the ISMCTS availability rule below it. The
+    // asymmetry is deliberate and is not a place to "restore" consistency:
+    // nothing maintains `ln_availability` on a root child — `Node::expand` and
+    // the `ROOT_CHOICES_INVARIANT` fast path both skip the `ln` there rather
+    // than pay a libm call per child per iteration on the widest loop in the
+    // search, and `reroot_at` resets the field on promotion — so reading it
+    // here would score the root against a stale zero. The correction the root
+    // does need is in `rank`, which ranks the answer on a mean and breaks ties
+    // on visits over availability; the exploration term is what apportions the
+    // budget between children the root offers on every iteration anyway.
     let is_root = node.is_root();
     let root_ln = if is_root {
         (node.visits as f64).ln()

@@ -40,6 +40,12 @@ jobs:
       - name: Test (release)
         run: cargo test --release --all-features
 
+      # The dev profile, deliberately: overflow checks and `debug_assert!` are
+      # on here and nowhere else the example runs, and a debug-build panic on
+      # its first move is what went unnoticed while nothing executed it.
+      - name: Run the example
+        run: cargo run --example tic_tac_toe
+
       - name: Feature matrix
         run: |
           for f in "" time parallel serde time,parallel time,serde parallel,serde; do
