@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::game::Game;
 use crate::node::{Node, NodeKind};
+use crate::rank::{leader_of, Candidate};
 use crate::search::{Config, RootPolicy, SearchResult, Searcher, StopReason};
 use crate::util::uniform_01;
 
@@ -143,8 +144,8 @@ where
                 .is_some_and(|root| root.simultaneous_players().is_some())
         });
         // Under `Duct` the per-worker strategy is one-hot at that worker's
-        // most-visited arm, so pooled visits already say the same thing and
-        // both root policies read the visit leader. Under a policy that mixes,
+        // leading arm, so the pooled counts already say the same thing and both
+        // root policies read the pooled leader. Under a policy that mixes,
         // neither policy may: `duct::best_arm` argmaxes the same
         // availability-divided strategy weight `Sampled` draws from, so a merge
         // answering `MostVisited` with the pooled-visit argmax would return an
@@ -155,18 +156,20 @@ where
         let mut merged = Merged::new();
         let mut strategy = Vec::new();
         let mut shares = Vec::new();
-        // Arms accumulate every action any determinization offered, so merging
-        // them unfiltered can return a move the perspective player does not
-        // have in the real position. The single-threaded path filters against
-        // the position in `extract_marginal`; this is that filter, applied by
-        // seeding the merge with the legal actions and refusing to add any
-        // other. Sequential roots keep merging by insertion, unchanged.
+        // A worker's tree holds every action any of its determinizations
+        // offered, so merging unfiltered can return a move the perspective
+        // player does not have in the real position. The single-threaded path
+        // filters against the position at extraction; this is that filter,
+        // applied by seeding the merge with the legal actions and refusing to
+        // add any other.
+        let mut legal = Vec::new();
         if simultaneous {
-            let mut legal = Vec::new();
             state.choices_for_into(ctx, perspective, &mut legal);
-            for choice in &legal {
-                merged.slot(choice);
-            }
+        } else {
+            state.choices_into(ctx, &mut legal);
+        }
+        for choice in &legal {
+            merged.slot(choice);
         }
         for (searcher, _) in &self.workers {
             let Some(root) = searcher.tree() else {
@@ -192,8 +195,12 @@ where
                         let Some(index) = merged.get(marginals.choice(arm)) else {
                             continue;
                         };
-                        merged.visits[index] += stats[arm].visits;
-                        merged.reward[index] += stats[arm].cumulative_reward;
+                        merged.add(
+                            index,
+                            stats[arm].visits,
+                            stats[arm].availability,
+                            stats[arm].cumulative_reward,
+                        );
                         if mixes {
                             shares.push((index, strategy[arm]));
                         }
@@ -214,19 +221,25 @@ where
                             .edge()
                             .choice()
                             .expect("a sequential root's children all carry a choice");
-                        let index = merged.slot(choice);
-                        merged.visits[index] += child.visits();
-                        merged.reward[index] += child.cumulative_reward();
+                        let Some(index) = merged.get(choice) else {
+                            continue;
+                        };
+                        merged.add(
+                            index,
+                            child.visits(),
+                            child.availability,
+                            child.cumulative_reward(),
+                        );
                     }
                 }
             }
         }
 
-        // Seeding makes `order` non-empty before any worker has contributed, so a
-        // simultaneous merge asks whether anything was actually merged rather
-        // than whether the map is empty.
+        // Seeding makes `order` non-empty before any worker has contributed, so
+        // the merge asks whether anything was actually merged rather than
+        // whether the map is empty.
         let contributed = merged.visits.iter().any(|&visits| visits > 0);
-        if merged.order.is_empty() || (simultaneous && !contributed) {
+        if merged.order.is_empty() || !contributed {
             // No worker completed an iteration; fall back to any worker's answer.
             return results.into_iter().next().expect("at least one worker");
         }
@@ -298,6 +311,10 @@ struct Merged<C> {
     order: Vec<C>,
     position: FxHashMap<C, usize>,
     visits: Vec<u32>,
+    /// The opportunities those visits were drawn from, pooled over the same
+    /// trees. The ranking divides one by the other, so a worker that
+    /// contributes visits has to contribute the window they came out of.
+    availability: Vec<u32>,
     reward: Vec<f64>,
     strategy: Vec<f64>,
 }
@@ -308,6 +325,7 @@ impl<C: Clone + Eq + Hash> Merged<C> {
             order: Vec::new(),
             position: FxHashMap::default(),
             visits: Vec::new(),
+            availability: Vec::new(),
             reward: Vec::new(),
             strategy: Vec::new(),
         }
@@ -328,6 +346,7 @@ impl<C: Clone + Eq + Hash> Merged<C> {
                 self.order.push(choice.clone());
                 self.position.insert(choice.clone(), index);
                 self.visits.push(0);
+                self.availability.push(0);
                 self.reward.push(0.0);
                 self.strategy.push(0.0);
                 index
@@ -350,17 +369,30 @@ impl<C: Clone + Eq + Hash> Merged<C> {
         best
     }
 
-    /// The most-visited entry, first maximum so ties break deterministically.
+    /// Pool one tree's statistics for `choice` into the entry at `index`.
+    fn add(&mut self, index: usize, visits: u32, availability: u32, reward: f64) {
+        self.visits[index] += visits;
+        self.availability[index] += availability;
+        self.reward[index] += reward;
+    }
+
+    /// The leading entry under the crate's one root ranking ([`crate::rank`]),
+    /// first maximum so ties break deterministically. Pooled statistics rather
+    /// than a vote, and ranked by the same rule a single tree is: a merge that
+    /// argmaxed raw pooled visits would answer a position differently from the
+    /// `Searcher` it is a pool of.
     fn leader(&self) -> usize {
-        let mut best = 0;
-        let mut best_visits = 0;
-        for (index, &visits) in self.visits.iter().enumerate() {
-            if visits > best_visits {
-                best_visits = visits;
-                best = index;
-            }
-        }
-        best
+        leader_of((0..self.visits.len()).map(|index| {
+            (
+                index,
+                Candidate::new(
+                    self.visits[index],
+                    self.availability[index],
+                    self.reward[index],
+                ),
+            )
+        }))
+        .map_or(0, |(index, _)| index)
     }
 }
 
@@ -429,7 +461,7 @@ mod tests {
     }
 
     /// One sequential ply and nothing else: choice `c` pays `c / 2` to player 0,
-    /// so the most-visited merge has one unambiguous answer.
+    /// so the merge has one unambiguous answer.
     #[derive(Clone, Default)]
     struct Ladder {
         payoff: Option<f64>,

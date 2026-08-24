@@ -179,6 +179,12 @@ before asserting anything about it. Reverting both gates to `if node.is_root()` 
 review's two failure modes exactly: in debug, the crate's own consistency assertions fire; in
 release, the sequential twin hands the caller move 2 at a position offering `[0, 1]`.
 
+The "worse, because `most_visited` there is unfiltered" clause above no longer holds: the
+sequential root's answer and its early-termination proof are both restricted to the choices
+`state` offers, the same filter the simultaneous root has always applied. That is a second,
+independent guard on the same failure and not a replacement for this one — selection during the
+descent still has to be right, or the search spends its budget in worlds it cannot play.
+
 A side effect worth recording: the fast path's own `assert_eq!` messages ("ROOT_CHOICES_INVARIANT
 is set, but this determinization offers …") are now *true* accusations. The path can only be
 reached after a pass proved the sets equal, so a later mismatch really is the game breaking its
@@ -549,7 +555,7 @@ Baseline: **97 tests pass** (55 unit, 1 allocation, 2 root-choices, 12 legacy se
 | 2 | `select_duct` -> `unimplemented!()` | `duct_extracts_a_pure_strategy_on_rps` | **that test**, plus `biased_rps_duct_misses_the_equilibrium`, `both_policies_commit_to_a_pure_equilibrium`, `duct_breaks_a_tie_uniformly`, `duct_opens_unvisited_arms_uniformly`, `duct_ties_are_measured_against_the_final_maximum`, `duct_plays_a_pure_strategy_on_the_same_game`, 4 more | 11 |
 | 3 | sleeping-bandit filter: drop the `avail_epoch == epoch` guard on the regret subtraction | `a_rarely_legal_action_is_not_starved` | **that test** (`scissors took 0.0052 of player 1's selections, far below the 0.26-0.31 the availability correction leaves it`), plus `an_arm_legal_half_the_time_keeps_a_usable_regret` and `a_most_visited_merge_agrees_with_a_single_threaded_search` | 3 |
 | 4 | importance weight: `regret += u_hat` instead of `u_hat / mu` | `biased_rps_learns_the_known_equilibrium` | **that test**, caught by the **per-run** floor added this session (`seed 1 alone extracted [0.333, 0.333, 0.333] … exploitable by 0.0833, through the per-run floor of 0.12 / 0.04`), plus `regret_matching_learns_the_biased_rps_equilibrium`, `the_default_floor_keeps_improving_with_budget`, `most_visited_root_policy_is_deterministic`, 7 more | 11 |
-| 5 | availability division: drop `/ availability` in `root_weight` | `a_rarely_legal_action_is_not_starved` / a root-extraction test | `root_extraction_divides_out_availability`, `the_deterministic_root_move_divides_out_availability`, `a_most_visited_merge_agrees_with_a_single_threaded_search`. **NOT** `a_rarely_legal_action_is_not_starved`; **no integration test at all** — see finding M-1 | 3 |
+| 5 | availability division: drop `/ availability` in `root_weight` | `a_rarely_legal_action_is_not_starved` / a root-extraction test | `root_extraction_divides_out_availability`, `the_deterministic_root_move_is_not_the_visit_argmax`, `a_most_visited_merge_agrees_with_a_single_threaded_search`. **NOT** `a_rarely_legal_action_is_not_starved`; **no integration test at all** — see finding M-1 | 3 |
 | 6 | `exploration_floor`: revert `t^(-1/4)` to `gamma_0 / sqrt(t)` | `the_default_floor_keeps_improving_with_budget` | **NOT that test** — see finding M-2. Caught only by `the_exploration_floor_is_always_a_usable_probability` (a constant table), `a_saturated_search_stops_allocating` (a saturation precondition), and `root_parallel_merges_marginals` (per-worker exploitability 0.0599 against the 0.04 floor) | 3 |
 | 7 | backup: credit one perspective's `reward` to every arm instead of each arm's own player | `three_players_…` / asymmetric test | **both named tests** (`three_players_each_do_at_least_as_well_as_a_coin_flip`, `asymmetric_participants_get_their_own_action_lists`), plus `matching_pennies_…`, `rps_does_not_converge_to_a_pure_strategy`, `most_visited_returns_the_perspective_players_own_arm`, 13 more | 18 |
 | 8 | joint key: pack the global arm index instead of the slot-relative one | `wide_simultaneous_nodes_track_every_arm_and_joint_child` | **that test**, plus 40 more. Surfaces as an index-out-of-bounds inside `JointChoices::get` (`src/game.rs:292`, "the len is 80 but the index is 109") rather than as a behavioural assertion — see note M-3 | 41 |

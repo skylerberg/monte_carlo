@@ -360,6 +360,21 @@ impl<C> Node<C> {
         self.visits
     }
 
+    /// Iterations at the parent that offered the choice leading here, which is
+    /// the denominator [`Node::visits`] is a numerator of.
+    ///
+    /// A child can only be selected on an iteration whose determinization made
+    /// it legal, so `visits <= availability` always and the ratio — not the
+    /// visit count — is how often the search took the choice given the chance.
+    /// That ratio is how a root's answer is ranked, and this is what lets a
+    /// caller reproduce or log the ranking from [`crate::Searcher::tree`].
+    /// Read it on a child. A root has no parent to have been offered by, so its
+    /// own count is either the 1 it was created with or whatever it carried up
+    /// from the node it was promoted from.
+    pub fn availability(&self) -> u32 {
+        self.availability
+    }
+
     /// Mean reward for the player this node accumulates for, or 0.0 if never
     /// visited. See [`Node::reward_player`].
     pub fn mean_reward(&self) -> f64 {
@@ -1056,11 +1071,34 @@ impl<'a, C> Marginals<'a, C> {
         }
     }
 
-    /// Index of the most-selected arm, first maximum so ties break
-    /// deterministically. `None` if no arm has been selected yet.
+    /// Index of the arm this player's search settled on, first maximum so ties
+    /// break deterministically. `None` if no arm has been selected yet.
+    ///
+    /// The best mean reward, not the most selections: an arm is selectable only
+    /// on the iterations it was legal, so raw counts rank an arm the
+    /// determinizations rarely dealt below one they dealt constantly, however
+    /// much better it is. An arm the search sampled too few times for its mean
+    /// to mean anything is ranked below every arm that cleared the bar, and the
+    /// selection rate breaks ties between equal means.
+    /// [`Marginals::most_visited`] is the raw count.
     ///
     /// The right answer only where the equilibrium is pure. See
     /// [`Marginals::policy_into`].
+    pub fn leader(&self) -> Option<usize> {
+        crate::rank::leader_of(self.stats.iter().enumerate().map(|(i, arm)| {
+            (
+                i,
+                crate::rank::Candidate::new(arm.visits, arm.availability, arm.cumulative_reward),
+            )
+        }))
+        .map(|(i, _)| i)
+    }
+
+    /// Index of the most-selected arm, first maximum so ties break
+    /// deterministically. `None` if no arm has been selected yet.
+    ///
+    /// The raw count, for inspection. It is *not* what a root move is read off:
+    /// see [`Marginals::leader`].
     pub fn most_visited(&self) -> Option<usize> {
         let mut best = None;
         let mut best_visits = 0;
@@ -1081,8 +1119,8 @@ impl<'a, C> Marginals<'a, C> {
     /// time-averaged strategy with the exploration floor already excluded and
     /// availability divided out — the only extraction with a convergence result
     /// behind it, and the one to sample. Under
-    /// [`crate::SimultaneousPolicy::Duct`] it is one-hot at the most-selected
-    /// arm, deliberately: decoupled UCB1 converges to a pure policy, and its
+    /// [`crate::SimultaneousPolicy::Duct`] it is one-hot at [`Marginals::leader`],
+    /// deliberately: decoupled UCB1 converges to a pure policy, and its
     /// visit distribution is precisely the object an opponent exploits, so this
     /// crate will not hand it back dressed as a mixed strategy.
     ///
@@ -1111,7 +1149,7 @@ impl<'a, C> Marginals<'a, C> {
                 }
                 return;
             }
-        } else if let Some(best) = self.most_visited() {
+        } else if let Some(best) = self.leader() {
             out.resize(self.stats.len(), 0.0);
             out[best] = 1.0;
             return;
@@ -1328,6 +1366,12 @@ mod tests {
         simul.marginals(0).policy_into(&mut out);
         assert_eq!(out, vec![1.0 / 3.0; 3]);
 
+        // Opportunities alongside the selections: an arm cannot have been taken
+        // more often than it was offered, and the ranking divides one by the
+        // other.
+        for arm in simul.arm_stats.iter_mut() {
+            arm.availability = 8;
+        }
         simul.arm_stats[1].visits = 5;
         simul.arm_stats[2].visits = 3;
         simul.marginals(0).policy_into(&mut out);

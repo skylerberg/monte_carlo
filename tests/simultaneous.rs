@@ -400,6 +400,12 @@ fn both_policies_commit_to_a_pure_equilibrium() {
 /// fails loudly if `Duct` ever silently starts mixing — at which point the
 /// contract in `Marginals::policy_into`'s doc, that a `Duct` strategy is never
 /// handed back dressed as a mixed one, would be broken.
+///
+/// The arm it commits to is `Marginals::leader`, not `Marginals::most_visited`.
+/// Those coincide only where the visit argmax and the ranking agree, and on a
+/// mixed equilibrium they need not: three arms that are worth the same to within
+/// noise split the budget nearly evenly, so the best measured arm and the most
+/// selected one come apart on a coin toss.
 #[test]
 fn duct_extracts_a_pure_strategy_on_rps() {
     let game = Ducted(Rps::default());
@@ -422,8 +428,8 @@ fn duct_extracts_a_pure_strategy_on_rps() {
         let marginals = root.marginals(player).expect("the player acts at the root");
         assert_eq!(
             Some(picked),
-            marginals.most_visited(),
-            "Duct's extracted strategy {strategy:?} does not agree with its visits"
+            marginals.leader(),
+            "Duct's extracted strategy {strategy:?} does not agree with its ranking"
         );
     }
 }
@@ -1268,23 +1274,32 @@ fn a_parallel_simultaneous_root_returns_an_action_the_player_has() {
 /// Early termination must not change the answer — the contract `tests/search.rs`
 /// states for a sequential root, held at a simultaneous one.
 ///
-/// Under `Duct` with [`RootPolicy::MostVisited`] the answer is the most-visited
-/// *legal* arm, so a proof that the leader cannot be overtaken is a proof about
-/// the answer only if it ranks the legal arms alone. At [`ForbiddenFavourite`]
-/// the arm that runs away with the visits is the one the real position
-/// withholds, while the two arms the answer is really drawn from are a
-/// matching-pennies sub-game whose leader keeps changing. Proving the withheld
-/// arm safe stops the search on a question it was never asked, and the answer it
-/// stops on is the sub-game's previous leader rather than its last.
+/// Under `Duct` with [`RootPolicy::MostVisited`] the answer is the leading
+/// *legal* arm, so a proof about the leading arm of the whole tree is a proof
+/// about the answer only if the two are ranked over the same candidates. At
+/// [`AbandonedRivals`] they are not: the arm that runs away with the visits is
+/// the one the real position withholds, and the two arms the answer is really
+/// drawn from are a matching-pennies sub-game the search abandons after a
+/// handful of selections, with its leader still swinging when the budget ends.
 ///
-/// Sixteen seeds because that only shows as a changed answer when the sub-game
-/// swings after the stop, which is about every other seed; one seed would be a
-/// coin toss.
+/// That is exactly the shape the surviving proof fires on, which is what makes
+/// the mask observable from outside. Ranked over all three arms, the withheld
+/// favourite has cleared the evidence bar and both of its rivals are stuck far
+/// under it, so the proof reports `Proven` — measured at 1974 of 2000 — about a
+/// question the search was never asked. Ranked over the two legal arms alone,
+/// neither has cleared the bar, so there is nothing to prove and the search
+/// spends its budget. `StopReason::Budget` here *is* the mask.
+///
+/// Sixteen seeds because the stale answer only differs from the full-budget one
+/// when the sub-game swings after the stop, which is about every other seed.
 #[test]
 fn early_termination_does_not_change_a_simultaneous_answer() {
     const BUDGET: u32 = 2_000;
+    // `rank::MIN_EVIDENCE`, which is not public. A rival this far under it
+    // cannot reach it with the iterations this search has left.
+    const EVIDENCE_BAR: u32 = 32;
 
-    let game = Ducted(ForbiddenFavourite::banned());
+    let game = Ducted(AbandonedRivals::banned());
     let patient = Config {
         simultaneous: SimultaneousConfig {
             root_policy: RootPolicy::MostVisited,
@@ -1304,23 +1319,20 @@ fn early_termination_does_not_change_a_simultaneous_answer() {
         let mut searcher = Searcher::new(&game);
         let full = searcher.search(&game, &(), 0, &patient, None, &mut rng(seed));
 
-        let marginals = searcher
-            .tree()
-            .expect("a search leaves a tree")
-            .marginals(0)
-            .expect("player 0 acts at this root");
+        let arms = root_arms(&searcher);
         let visits = |want: u8| {
-            (0..marginals.len())
-                .find(|&arm| *marginals.choice(arm) == want)
-                .map_or(0, |arm| marginals.visits(arm))
+            arms.iter()
+                .find(|&&(action, _)| action == want)
+                .map_or(0, |&(_, visits)| visits)
         };
         assert!(
-            legal
-                .iter()
-                .all(|&action| visits(action) < visits(FORBIDDEN_ACTION)),
-            "seed {seed} gave the withheld action {} visits against {:?} for the legal \
-             ones, so an unmasked proof would rank a legal arm first anyway and this \
-             test proves nothing",
+            visits(FORBIDDEN_ACTION) >= EVIDENCE_BAR
+                && legal
+                    .iter()
+                    .all(|&action| visits(action) + EVIDENCE_BAR < visits(FORBIDDEN_ACTION)),
+            "seed {seed}: an unmasked proof has to be available for this seed to say \
+             anything — the withheld action needs the evidence and the legal ones must \
+             not have it. Withheld {}, legal {:?}",
             visits(FORBIDDEN_ACTION),
             legal.iter().map(|&a| visits(a)).collect::<Vec<_>>()
         );
@@ -1328,24 +1340,16 @@ fn early_termination_does_not_change_a_simultaneous_answer() {
         let mut searcher = Searcher::new(&game);
         let stopped = searcher.search(&game, &(), 0, &hasty, None, &mut rng(seed));
 
-        // The mechanism under test has to have run. A configuration that never
-        // proved anything would spend the whole budget and compare a search
-        // against itself, which is the one result this test must not report as a
-        // pass. Measured, all sixteen seeds prove at 1958-1999 of 2000.
         assert_eq!(
             stopped.stop_reason,
-            StopReason::Proven,
-            "seed {seed}: the hasty search stopped for {:?} after {} of {BUDGET} \
-             iterations, so early termination never fired and this seed compares two \
-             identical searches",
-            stopped.stop_reason,
+            StopReason::Budget,
+            "seed {seed}: stopped after {} of {BUDGET} iterations. The answer's own \
+             rivals are both under the evidence bar, so nothing about it is provable \
+             and the only arm that could have been proved is one the answer is never \
+             drawn from",
             stopped.root_visits
         );
-        assert!(
-            stopped.root_visits < BUDGET,
-            "seed {seed}: the proof arrived on the last iteration, so nothing was saved \
-             and nothing was skipped"
-        );
+        assert_eq!(stopped.root_visits, BUDGET);
 
         assert!(
             legal.contains(&stopped.choice),
@@ -1361,19 +1365,6 @@ fn early_termination_does_not_change_a_simultaneous_answer() {
     }
 }
 
-/// Player 0's arms at the root of `searcher`'s tree, as `(action, visits)` in
-/// arm order.
-fn root_arms<G: Game<Choice = u8>>(searcher: &Searcher<G>) -> Vec<(u8, u32)> {
-    let marginals = searcher
-        .tree()
-        .expect("a search leaves a tree")
-        .marginals(0)
-        .expect("player 0 acts at this root");
-    (0..marginals.len())
-        .map(|arm| (*marginals.choice(arm), marginals.visits(arm)))
-        .collect()
-}
-
 /// The same contract as
 /// [`early_termination_does_not_change_a_simultaneous_answer`], held by a
 /// `Searcher` that has already searched a different position.
@@ -1387,24 +1378,21 @@ fn root_arms<G: Game<Choice = u8>>(searcher: &Searcher<G>) -> Vec<(u8, u32)> {
 /// guarantees nothing, because a new position can offer the same number of arms
 /// as the last one and a different set of them.
 ///
-/// So the warming search here is the *unbanned* [`ForbiddenFavourite`], whose
-/// three arms are all legal, and the search under test is the banned one, whose
-/// three arms include the withheld favourite. A mask carried over from the
-/// warming search calls all three legal, and the proof then ranks the one arm
-/// the answer is never drawn from — reporting `Proven` about a question the
-/// search was not asked.
-///
-/// Sixteen seeds for the same reason the sibling uses sixteen, and with the
-/// same caveat: the stale proof only shows as a *changed* answer when the two
-/// kept arms swing after the stop, which is about every other seed. Detection
-/// is statistical rather than structural, so a maintainer watching this fail
-/// should suspect the mask before suspecting a flake.
+/// So the warming search here is the *unbanned* [`AbandonedRivals`], whose three
+/// arms are all legal, and the search under test is the banned one, whose three
+/// arms include the withheld favourite. A mask carried over from the warming
+/// search calls all three legal, the proof then ranks the one arm the answer is
+/// never drawn from, finds both of its rivals under the evidence bar, and reports
+/// `Proven` about a question the search was not asked. A rebuilt mask leaves the
+/// proof with two arms that have cleared nothing, and it declines.
 #[test]
 fn a_reused_searcher_does_not_carry_a_legality_mask_between_searches() {
     const BUDGET: u32 = 2_000;
+    // See the sibling test.
+    const EVIDENCE_BAR: u32 = 32;
 
-    let warmup = Ducted(ForbiddenFavourite::default());
-    let game = Ducted(ForbiddenFavourite::banned());
+    let warmup = Ducted(AbandonedRivals::default());
+    let game = Ducted(AbandonedRivals::banned());
     let patient = Config {
         simultaneous: SimultaneousConfig {
             root_policy: RootPolicy::MostVisited,
@@ -1435,18 +1423,18 @@ fn a_reused_searcher_does_not_carry_a_legality_mask_between_searches() {
                 .map_or(0, |&(_, visits)| visits)
         };
         assert!(
-            legal
-                .iter()
-                .all(|&action| visits(action) < visits(FORBIDDEN_ACTION)),
-            "seed {seed} gave the withheld action {} visits against {:?} for the legal \
-             ones, so a stale all-legal mask would rank a legal arm first anyway and \
-             this test proves nothing",
+            visits(FORBIDDEN_ACTION) >= EVIDENCE_BAR
+                && legal
+                    .iter()
+                    .all(|&action| visits(action) + EVIDENCE_BAR < visits(FORBIDDEN_ACTION)),
+            "seed {seed}: a stale all-legal mask has to be able to prove something for \
+             this seed to say anything. Withheld {}, legal {:?}",
             visits(FORBIDDEN_ACTION),
             legal.iter().map(|&a| visits(a)).collect::<Vec<_>>()
         );
 
         let mut warm = Searcher::new(&game);
-        warm.search(&warmup, &(), 0, &hasty, None, &mut rng(seed));
+        let warmed = warm.search(&warmup, &(), 0, &hasty, None, &mut rng(seed));
         assert_eq!(
             root_arms(&warm).len(),
             arms.len(),
@@ -1454,27 +1442,24 @@ fn a_reused_searcher_does_not_carry_a_legality_mask_between_searches() {
              search under test builds, so a stale mask would fail the length check and \
              this test proves nothing"
         );
+        assert_eq!(
+            warmed.stop_reason,
+            StopReason::Proven,
+            "seed {seed}: the warming search must leave behind the all-legal mask a \
+             proof consulted, or there is no stale mask to carry"
+        );
 
         let stopped = warm.search(&game, &(), 0, &hasty, None, &mut rng(seed));
 
-        // Same guard as the sibling test, and it is doing more work here: the
-        // stale mask is only reachable through a proof, so a run that proved
-        // nothing could not have carried one and its agreement below would mean
-        // nothing. Measured, all sixteen seeds prove at 1958-1999 of 2000.
         assert_eq!(
             stopped.stop_reason,
-            StopReason::Proven,
-            "seed {seed}: the warmed search stopped for {:?} after {} of {BUDGET} \
-             iterations. No proof ran, so no mask was consulted and this seed says \
-             nothing about a stale one",
-            stopped.stop_reason,
+            StopReason::Budget,
+            "seed {seed}: the warmed search stopped after {} of {BUDGET} iterations. \
+             Nothing about the answer is provable here, so the mask it ranked against \
+             was the warming position's",
             stopped.root_visits
         );
-        assert!(
-            stopped.root_visits < BUDGET,
-            "seed {seed}: the proof arrived on the last iteration, so no iteration was \
-             decided by it"
-        );
+        assert_eq!(stopped.root_visits, BUDGET);
 
         assert!(
             legal.contains(&stopped.choice),
@@ -1488,6 +1473,19 @@ fn a_reused_searcher_does_not_carry_a_legality_mask_between_searches() {
             stopped.choice, stopped.root_visits, full.choice, full.root_visits
         );
     }
+}
+
+/// Player 0's arms at the root of `searcher`'s tree, as `(action, visits)` in
+/// arm order.
+fn root_arms<G: Game<Choice = u8>>(searcher: &Searcher<G>) -> Vec<(u8, u32)> {
+    let marginals = searcher
+        .tree()
+        .expect("a search leaves a tree")
+        .marginals(0)
+        .expect("player 0 acts at this root");
+    (0..marginals.len())
+        .map(|arm| (*marginals.choice(arm), marginals.visits(arm)))
+        .collect()
 }
 
 /// Spending the budget is not a proof at a `Duct` root either.

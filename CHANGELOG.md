@@ -7,13 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+* **A root's answer is its best-valued candidate, not its most-visited one.** A
+  choice is selectable only on the iterations in which it was legal, so
+  `visits <= availability` is a hard cap and an argmax over raw visits ranks by
+  legality rate as much as by value: a move offered by a third of the
+  determinizations and played on nearly every iteration that offered it lost to
+  a move offered by all of them and played on two thirds, at any budget. Every
+  argmax-family root now ranks by the same rule — the sequential root,
+  `SimultaneousPolicy::Duct`'s marginal, `Marginals::policy_into`, the new
+  `Marginals::leader`, and `RootParallel`'s pooled merge — and the rule is the
+  **mean reward**, with the selection rate `visits / availability` breaking ties
+  and a candidate the search selected at least 32 times outranking one it did
+  not. Not the selection rate itself, which was the obvious correction and does
+  not work: a rate saturates at 1.0, and selection pushes any rarely-offered
+  candidate against that ceiling whatever it is worth, so a decoy offered one
+  determinization in a hundred scores 97/97 = 1.000 and beats a genuinely best
+  move at 9873/9999 = 0.987. The mean has no ceiling to hide behind, and the
+  32-selection bar is what stops one lucky rollout from winning the root. See
+  `src/rank.rs` for the derivation and for what the rule gives up.
+  `Marginals::most_visited` still reports the raw count.
+* **`Config::early_termination` proves much less, and it is now a bound rather
+  than an estimate.** The answer is a mean reward and a mean moves with the
+  *rewards*, so no arithmetic over the visit counts bounds it — and
+  `Config::min_reward` / `Config::max_reward` are a declaration the crate never
+  clamps to, so they cannot supply the missing interval either. What is still
+  proved is the evidence bar: a rival that cannot reach 32 selections with the
+  iterations left can never leave the tier below the leader's, whatever any
+  reward turns out to be. That caps the saving at 31 iterations however large
+  the budget, and it is a no-op at a root whose rivals are all well sampled;
+  where a 5 000-iteration search used to stop at 2 506 it now stops at 4 974.
+  Because the saving is capped, so is the price: the proof is skipped outright
+  until the last 31 iterations rather than scanning every root candidate on
+  every one of them, which is worth 24% of the wall clock of a 20 000-iteration
+  search at a 5 000-child root.
+  `StopReason::Proven` still means what it says. Two further refusals: a leader
+  that has not cleared the bar proves nothing about anyone, and a position that
+  offers a legal move the tree has no candidate for is never settled, because a
+  candidate created with `n` iterations left can spend all of them, clear the
+  bar, and be ranked on a mean nothing in hand constrains.
+* **`Node::availability` is public.** How many iterations offered a choice is
+  half of the rate that breaks the root ranking's ties, and it was not reachable
+  from `Searcher::tree`, so a caller could neither reproduce the ranking nor tell
+  whether their `determinize_into` varies the legal set at all.
+
 ### Fixed
 
+* **The sequential root's answer is filtered against the real position.** The
+  tree accumulates every choice any determinization offered, and `search` used
+  to return that union's leader — so under determinization, or after
+  `reuse_subtree` on a game with a chance event, it could return a move the
+  player does not hold, stamped `StopReason::Proven`. `SearchResult::choice` is
+  now always legal in the `state` the search was called on, and the
+  early-termination proof ranks only the legal candidates. The simultaneous root
+  already did this; `RootParallel`'s sequential merge now does it too.
+* **`Searcher::root_policy_into` no longer returns `true` with an empty
+  policy.** Where the tree's arms for that slot and the position's legal actions
+  are disjoint — an ordinary state at low budgets when a player's legal set is
+  hidden — it wrote nothing and still promised pairs summing to 1. It now falls
+  back to a uniform distribution over the player's legal actions, which is the
+  distribution `Searcher::search` already drew its answer from, and returns
+  `false` when the player has no legal action at all.
+* **A root child's availability is counted on the `ROOT_CHOICES_INVARIANT` fast
+  path.** That path skips expansion entirely, so availability froze at whatever
+  the first pass wrote while visits went on accumulating — after a
+  `reuse_subtree`, at values progressive expansion left at a node that was not
+  the root. Nothing read the pair before; the root ranking now divides one by
+  the other to break its ties, and `Marginals::availability` reports it. The
+  cached `ln(availability)` moves with the count on that path too, so no future
+  reader of the cache can find it frozen.
 * **`StopReason::Proven` now means what it says.** The early-termination proof
-  is the conserved-visit bound and nothing else: one iteration adds one visit to
-  one candidate, so a candidate behind by more visits than there are iterations
-  left cannot draw level. The adversarial UCB1 replay that used to run at a
-  sequential root every 1024 visits is gone. It was not an upper bound — it paid
+  is a bound and never an estimate of how the remaining iterations would
+  probably be spent — see the entry on `Config::early_termination` above for the
+  bound that survives the root ranking change. The adversarial UCB1 replay that
+  used to run at a sequential root every 1024 visits is gone. It was not an upper bound — it paid
   every challenger the maximum reward in a single replay, so challengers
   competed with each other for a budget the question asks about one at a time —
   and it modelled only the children that existed when it ran, so a choice a

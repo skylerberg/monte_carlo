@@ -745,6 +745,104 @@ impl Game for ManyArm {
 /// position, and hands back in every determinization of it.
 pub const FORBIDDEN_ACTION: u8 = 2;
 
+/// Payoff to player 0 at [`AbandonedRivals`], indexed
+/// `[player 0's action][player 1's action]`. Player 1 scores `1.0 - payoff`.
+///
+/// [`FORBIDDEN_ACTION`] pays a flat 1.0 and the two actions player 0 keeps are
+/// matching pennies worth 0.10, so decoupled UCB1 stops returning to the kept
+/// rows after a handful of selections — `(c / gap)^2 * ln(t)` of them at
+/// `c = 0.75` and `gap = 0.9`, which is single digits at any budget this test
+/// suite uses. That is the shape the surviving early-termination proof is about:
+/// the withheld arm is the only one with enough evidence behind it to be
+/// trusted, and the two the answer is actually drawn from are locked under the
+/// bar with the answer still swinging between them.
+pub const ABANDONED_RIVALS_PAYOFFS: [[f64; 2]; 3] = [[0.05, 0.15], [0.15, 0.05], [1.0, 1.0]];
+
+/// [`ForbiddenFavourite`] with the gap widened until the kept actions are
+/// abandoned.
+///
+/// The sibling fixture keeps its two legal rows in play deliberately, which is
+/// what makes it useless for the early-termination proof that survives the root
+/// ranking change: that proof fires only when every rival of the answer is too
+/// thinly sampled to be trusted and cannot be sampled enough with the iterations
+/// left. Here the withheld action is worth 1.0 against the kept rows' 0.10, so
+/// the kept rows *are* that thinly sampled — and a consumer that forgets to mask
+/// the arms against the real position ranks the withheld action first, finds
+/// both of its rivals stuck under the evidence bar, and reports
+/// `StopReason::Proven` about a question the search was never asked. A masked
+/// consumer sees only the two kept arms, neither of which has cleared the bar,
+/// and refuses.
+#[derive(Clone, Default)]
+pub struct AbandonedRivals {
+    payoff: Option<f64>,
+    banned: bool,
+}
+
+impl AbandonedRivals {
+    /// The position player 0 is actually in: [`FORBIDDEN_ACTION`] is not
+    /// available, though every determinization says otherwise.
+    pub fn banned() -> Self {
+        Self {
+            payoff: None,
+            banned: true,
+        }
+    }
+}
+
+impl Game for AbandonedRivals {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> Status<[f64; 2]> {
+        match self.payoff {
+            Some(payoff) => Status::Terminal([payoff, 1.0 - payoff]),
+            None => Status::Simultaneous {
+                players: PlayerSet::first_n(2),
+            },
+        }
+    }
+
+    fn choices_into(&self, _: &(), _: &mut Vec<u8>) {
+        unreachable!("AbandonedRivals names each player's actions through choices_for_into")
+    }
+
+    fn choices_for_into(&self, _: &(), player: u8, out: &mut Vec<u8>) {
+        out.extend([0, 1]);
+        if player == 0 && !self.banned {
+            out.push(FORBIDDEN_ACTION);
+        }
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), _: &u8, _: &mut R) {
+        unreachable!("AbandonedRivals has no sequential node")
+    }
+
+    fn apply_joint<R: Rng + ?Sized>(&mut self, _: &(), joint: JointChoices<'_, u8>, _: &mut R) {
+        self.payoff =
+            Some(ABANDONED_RIVALS_PAYOFFS[*joint.get(0) as usize][*joint.get(1) as usize]);
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 2] {
+        let banned = self.banned;
+        let payoff = *self.payoff.get_or_insert_with(|| {
+            let mine = below(rng, if banned { 2 } else { 3 }) as usize;
+            ABANDONED_RIVALS_PAYOFFS[mine][below(rng, 2) as usize]
+        });
+        [payoff, 1.0 - payoff]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+        dest.clone_from(self);
+        dest.banned = false;
+    }
+}
+
 /// Payoff to player 0 at [`ForbiddenFavourite`], indexed
 /// `[player 0's action][player 1's action]`. Player 1 scores `1.0 - payoff`.
 ///
