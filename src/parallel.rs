@@ -77,6 +77,12 @@ where
 
     /// `cfg.iterations` is the budget **per worker**, matching what an
     /// independent tree per thread means: N threads do N times the work.
+    ///
+    /// [`Config::early_termination`] still stops an individual worker, and a
+    /// worker that stops early contributes fewer visits to the merge. What it
+    /// does not do is prove anything about the merged answer, so a pool of more
+    /// than one worker never reports [`StopReason::Proven`]: early termination
+    /// there trades merged-answer stability for wall clock.
     pub fn search(
         &mut self,
         state: &G,
@@ -256,6 +262,13 @@ where
 }
 
 /// The most informative reason any worker stopped for.
+///
+/// `Proven` is the one reason that does not survive a merge. A worker proves
+/// that the argmax *of its own tree* cannot be overtaken in the iterations it
+/// had left; the merged answer is an argmax over pooled statistics that proof
+/// never saw, and a worker that stopped short contributed fewer visits to the
+/// pool than it would have. Nothing here re-establishes the claim, so a merge
+/// over more than one worker reports the budget it was given instead.
 fn merged_stop_reason<C>(results: &[SearchResult<C>]) -> StopReason {
     let rank = |reason: StopReason| match reason {
         StopReason::SingleChoice => 4,
@@ -264,11 +277,16 @@ fn merged_stop_reason<C>(results: &[SearchResult<C>]) -> StopReason {
         StopReason::Proven => 1,
         StopReason::Budget => 0,
     };
-    results
+    let reason = results
         .iter()
         .map(|r| r.stop_reason)
         .max_by_key(|&reason| rank(reason))
-        .unwrap_or(StopReason::Budget)
+        .unwrap_or(StopReason::Budget);
+    if reason == StopReason::Proven && results.len() > 1 {
+        StopReason::Budget
+    } else {
+        reason
+    }
 }
 
 /// Per-`Choice` totals pooled across workers.

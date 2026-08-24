@@ -1489,3 +1489,28 @@ fn a_reused_searcher_does_not_carry_a_legality_mask_between_searches() {
         );
     }
 }
+
+/// Spending the budget is not a proof at a `Duct` root either.
+///
+/// `settled` is asked after the iteration that reaches `target`, so answering
+/// "settled" there stamped `Proven` on a search that proved nothing. Only
+/// `Duct` was exposed: the mixing branch declines for its own reason, which is
+/// why [`early_termination_does_not_change_a_simultaneous_answer`] never
+/// reached this.
+#[test]
+fn a_spent_budget_at_a_duct_root_reports_budget() {
+    const BUDGET: u32 = 50;
+    let game = Ducted(Pennies::default());
+    let cfg = Config {
+        early_termination: true,
+        ..config(BUDGET)
+    };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &(), 0, &cfg, None, &mut rng(3));
+
+    assert_eq!(
+        result.root_visits, BUDGET,
+        "the search must reach its budget"
+    );
+    assert_eq!(result.stop_reason, StopReason::Budget);
+}

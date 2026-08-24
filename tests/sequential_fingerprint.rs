@@ -7,6 +7,13 @@
 //!
 //! Regenerate deliberately, never to make a red test green:
 //! `MCTS_WRITE_GOLDEN=1 cargo test --test sequential_fingerprint`.
+//!
+//! Regenerated once, for the early-termination soundness fix. Every `et=true`
+//! row that spent its whole budget now reads `stop=Budget` rather than
+//! `stop=Proven` — exhausting the budget was never a proof — and the six rows
+//! that used to stop at exactly 2048 stop later, at the visit gap the crate can
+//! actually prove, because the adversarial replay that produced 2048 was not an
+//! upper bound. No `choice` moved, and no `et=false` row moved.
 
 mod common;
 
