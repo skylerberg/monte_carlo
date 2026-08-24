@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-features --all-targets
+
+      - name: Test (all features)
+        run: cargo test --all-features
+
+      # The crate is built to run without `time` on wasm, where `Instant`
+      # panics, so the default-off path is a supported configuration and not a
+      # variant of the above.
+      - name: Test (no default features)
+        run: cargo test --no-default-features
+
+      - name: Feature matrix
+        run: |
+          for f in "" time parallel serde time,parallel time,serde parallel,serde; do
+            echo "::group::features=[$f]"
+            cargo check --no-default-features --features "$f"
+            echo "::endgroup::"
+          done

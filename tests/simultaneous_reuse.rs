@@ -536,7 +536,9 @@ fn a_forced_move_at_a_simultaneous_root_still_leaves_a_simultaneous_root() {
     assert_eq!(forced.stop_reason, StopReason::SingleChoice);
     assert_eq!(forced.choice, ONLY_ACTION);
 
-    let root = searcher.tree().expect("a forced move keeps the reused tree");
+    let root = searcher
+        .tree()
+        .expect("a forced move keeps the reused tree");
     assert_eq!(
         root.simultaneous_players(),
         Some(PlayerSet::first_n(2)),
