@@ -18,6 +18,59 @@ use crate::select::select;
 use crate::util::hash_of;
 use crate::util::{below, clamp_reward};
 
+/// The spread of rewards a search has actually seen.
+///
+/// `Duct` measures its tie tolerance against the width of the declared reward
+/// range, so a range declared wider than the payoffs makes every arm look tied
+/// and the draw over them uniform -- a range of `[0, 100]` on a game paying in
+/// `[0, 1]` inflates the tolerance a hundredfold. The payoffs the search has
+/// already collected are a better estimate of that width than the declaration,
+/// and they cost two comparisons on a path the reward already travels.
+///
+/// Not used until `MIN_EVIDENCE` rewards have arrived: one sample has a span of
+/// zero, and a tolerance of zero admits only bitwise-equal arms.
+#[derive(Clone, Copy)]
+struct Observed {
+    lo: f64,
+    hi: f64,
+    count: u32,
+}
+
+impl Observed {
+    const fn new() -> Self {
+        Observed {
+            lo: f64::INFINITY,
+            hi: f64::NEG_INFINITY,
+            count: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn see(&mut self, reward: f64) {
+        if reward < self.lo {
+            self.lo = reward;
+        }
+        if reward > self.hi {
+            self.hi = reward;
+        }
+        self.count = self.count.saturating_add(1);
+    }
+
+    /// The width to measure a tie against: what the search has seen once that is
+    /// worth trusting, and what the caller declared until then.
+    ///
+    /// Never wider than the declaration. A game may pay a narrower range than it
+    /// declared, which is the case this exists for; one that pays wider has
+    /// already been clamped, so `hi - lo` cannot exceed `declared`.
+    fn span(&self, declared: f64) -> f64 {
+        if self.count < crate::rank::MIN_EVIDENCE || self.hi <= self.lo {
+            declared
+        } else {
+            self.hi - self.lo
+        }
+    }
+}
+
 /// How often the wall clock is consulted, in iterations.
 const DEADLINE_CHECK_MASK: u32 = 31;
 
@@ -473,6 +526,8 @@ struct Scratch<G: Game> {
     /// and it doubles as `JointKey::pack`'s input so there is no separate key
     /// scratch.
     picks: Vec<u32>,
+    /// The reward spread this search has seen. See [`Observed`].
+    observed: Observed,
     sim_frames: Vec<SimFrame>,
     /// `arity` sampling probabilities per frame. `f32` is ample: the floor keeps
     /// a probability well inside f32's precision, and it halves the buffer.
@@ -526,6 +581,7 @@ impl<G: Game> Searcher<G> {
                 root_avail: Vec::new(),
                 path: Vec::new(),
                 picks: Vec::new(),
+                observed: Observed::new(),
                 sim_frames: Vec::new(),
                 sim_probs: Vec::new(),
                 root_legal: Vec::new(),
@@ -864,6 +920,8 @@ impl<G: Game> Searcher<G> {
             self.root = None;
         }
 
+        // Per search: a new position can pay on a different scale from the last.
+        self.scratch.observed = Observed::new();
         self.scratch.choices.clear();
         match root_players {
             None => state.choices_into(ctx, &mut self.scratch.choices),
@@ -1386,6 +1444,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
         root_avail,
         path,
         picks,
+        observed,
         sim_frames,
         sim_probs,
         root_fully_expanded,
@@ -1502,7 +1561,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
 
                 // The `k` picks are made independently; that is the definition
                 // of decoupling, and the tuple they form need not already exist.
-                let span = cfg.max_reward - cfg.min_reward;
+                let span = observed.span(cfg.max_reward - cfg.min_reward);
                 let prob_start = sim_probs.len() as u32;
                 picks.clear();
                 let simul = node.simul_mut().expect("the block was just installed");
@@ -1696,12 +1755,16 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
     // `Rewards` has no map, so confining the vector itself would need a trait
     // method, and the bound is only load-bearing here. Every mean the ranking
     // and the early-termination proof read is now inside the declared range.
-    let clamped = |player| clamp_reward(rewards.reward(player), cfg.min_reward, cfg.max_reward);
-    node.record(clamped(node.player));
+    let record = |node: &mut Node<G::Choice>, observed: &mut Observed| {
+        let reward = clamp_reward(rewards.reward(node.player), cfg.min_reward, cfg.max_reward);
+        observed.see(reward);
+        node.record(reward);
+    };
+    record(node, observed);
     for (depth, &i) in path.iter().enumerate() {
         node = &mut node.children[i as usize];
         backup.credit(node, depth + 1);
-        node.record(clamped(node.player));
+        record(node, observed);
     }
 
     rewards
