@@ -1191,7 +1191,7 @@ fn a_game_paying_its_declared_maximum_is_in_range() {
 /// visits land on the dominant action at `max_reward = 1` and 0.506 — chance —
 /// at `max_reward = 200`. Nothing else in the config moves between the two runs.
 #[test]
-fn a_range_declared_wider_than_the_payoffs_makes_duct_draw_at_random() {
+fn an_over_declared_reward_range_does_not_dissolve_ducts_answer() {
     let game = Ducted(DominantPair::default());
     let concentration = |max_reward: f64| {
         let cfg = Config {
@@ -1220,9 +1220,10 @@ fn a_range_declared_wider_than_the_payoffs_makes_duct_draw_at_random() {
     );
     let over_declared = concentration(200.0);
     assert!(
-        over_declared < 0.6,
-        "Duct still concentrates {over_declared} on the dominant action against a range \
-         two hundred times the payoffs, so the tie tolerance is not reading the range"
+        over_declared > 0.9,
+        "Duct concentrates only {over_declared} on the dominant action against a range two \
+         hundred times the payoffs, so the tie tolerance is still reading the declaration \
+         rather than the payoffs"
     );
 }
 

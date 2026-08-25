@@ -36,14 +36,18 @@ use crate::util::{below, uniform_01};
 /// which is index order, the exact rule randomized tie-breaking exists to
 /// avoid.
 ///
-/// The span is [`crate::Config::max_reward`] minus
-/// [`crate::Config::min_reward`], so this is the one place the declared range
-/// reaches a `Duct` search — there is no clamp on that path — and a range
-/// declared wider than the payoffs really are widens the pool in proportion.
-/// The reference cannot instead be the spread of the values actually observed
-/// at the node: that makes one arm with a terrible estimate widen the band the
-/// good arms are compared inside, which is backwards. It is the caller's
-/// declared scale or nothing, and [`crate::Config::max_reward`] says so.
+/// The span it scales is the spread of the *rewards the search has collected*,
+/// falling back to the declared range until enough have arrived to trust. It
+/// used to be the declared range outright, and a range declared wider than the
+/// payoffs really are widened the pool in proportion: on a two-arm game with a
+/// strictly dominant row paying in `[0, 1]`, declaring `max_reward = 200` put
+/// 0.506 of the visits on the dominant arm — chance.
+///
+/// The distinction that matters: this is the spread of *payoffs*, not the
+/// spread of the *values at a node*. Scaling by the latter would let one arm
+/// with a terrible estimate widen the band the good arms are compared inside,
+/// which is backwards. Payoffs are a property of the game, and a tie is
+/// "closer together than the game's own scale can distinguish".
 const TIE_TOLERANCE: f64 = 0.01;
 
 /// Slack on the reward-range assertion, as specified in DESIGN.md §6.
