@@ -117,6 +117,16 @@ use core::cmp::Ordering;
 /// anecdote.
 pub(crate) const MIN_EVIDENCE: u32 = 32;
 
+/// The range a game declared its payoffs fall in, which every reward is clamped
+/// into before it reaches an accumulator. Carried as one value because the two
+/// bounds are only ever meaningful together — a floor without its ceiling
+/// bounds nothing.
+#[derive(Clone, Copy)]
+pub(crate) struct RewardRange {
+    pub(crate) lo: f64,
+    pub(crate) hi: f64,
+}
+
 /// One root candidate's statistics: a sequential root's child, a simultaneous
 /// root's marginal arm, or a `RootParallel` merge's pooled entry.
 ///
@@ -242,38 +252,59 @@ pub(crate) fn leader_of(
 /// `gap` selections behind needs at least `gap` more iterations to draw level,
 /// because one iteration buys one candidate one visit. Counts are conserved and
 /// a rate is built out of counts, so ranking on a rate kept the whole proof in
-/// integer arithmetic. A **mean is not built out of counts** — it moves with
-/// the rewards — so that proof does not survive the ranking above, and the only
-/// sound replacement would need the rewards reaching a node's accumulator to be
-/// confined to a known interval. They are not; see [`crate::early_stop`], which
-/// records the check.
+/// integer arithmetic. A mean is not built out of counts, so that proof needs
+/// the rewards reaching an accumulator to be confined to a known interval —
+/// which they now are: every one is clamped to
+/// `[Config::min_reward, Config::max_reward]` where it enters, so a mean is too.
 ///
-/// What is left is a claim about tiers, which is pure counting and holds
-/// whatever any reward turns out to be: a challenger that cannot reach
-/// [`MIN_EVIDENCE`] selections even by taking every remaining iteration stays
-/// under the bar for the rest of the search, and a candidate under the bar
-/// never outranks one over it. The leader's own tier cannot move — visits only
-/// grow — so a leader over the bar stays over it.
+/// Two claims, and a challenger must fail both to be out of reach.
 ///
-/// Everything else is refused. An unestablished leader could be overtaken on
-/// the mean by anything, and so could an established one by an established
-/// rival, so those return `false` and the search spends its budget.
-pub(crate) fn out_of_reach(leader: &Candidate, challenger: &Candidate, remaining: u32) -> bool {
-    leader.established()
-        && u64::from(challenger.visits) + u64::from(remaining) < u64::from(MIN_EVIDENCE)
+/// **The tier claim** is pure counting and holds whatever any reward turns out
+/// to be: a challenger that cannot reach [`MIN_EVIDENCE`] selections even by
+/// taking every remaining iteration stays under the bar for the rest of the
+/// search, and a candidate under the bar never outranks one over it. The
+/// leader's own tier cannot move, since visits only grow.
+///
+/// **The mean claim** takes each side to its extreme. A visit never arrives
+/// without an iteration, so a challenger gains at most `remaining` of them, and
+/// its mean is highest when every one pays the ceiling:
+/// `(reward + remaining * hi) / (visits + remaining)`. The leader's is lowest
+/// when every one pays the floor. Both extremes are charged the same
+/// `remaining`, which no single run can honour — the iterations a challenger
+/// takes are ones the leader does not — so the bound is loose, and loose in the
+/// safe direction: it proves less often than it could, never more.
+///
+/// An unestablished leader is refused outright. Its rank is a mean that
+/// anything can overtake, and nothing above bounds the tier it will end in.
+pub(crate) fn out_of_reach(
+    leader: &Candidate,
+    challenger: &Candidate,
+    remaining: u32,
+    range: RewardRange,
+) -> bool {
+    if !leader.established() {
+        return false;
+    }
+    if u64::from(challenger.visits) + u64::from(remaining) < u64::from(MIN_EVIDENCE) {
+        return true;
+    }
+    let r = f64::from(remaining);
+    let ceiling =
+        (challenger.cumulative_reward + r * range.hi) / (f64::from(challenger.visits) + r);
+    let floor = (leader.cumulative_reward + r * range.lo) / (f64::from(leader.visits) + r);
+    // Strict: a reachable tie is settled by the selection rate, which this does
+    // not bound. NaN compares false here, which refuses rather than proves.
+    ceiling < floor
 }
 
 /// Whether [`out_of_reach`] can hold for any challenger at all with `remaining`
 /// iterations left.
 ///
-/// The bound is a count against [`MIN_EVIDENCE`], so a challenger holding no
-/// selections at all still reaches the bar while more iterations are left than
-/// the bar is high — and one that reaches it is one no count settles. The
-/// caller may skip the scan entirely there, which is what keeps a proof that
-/// can shorten any budget by at most `MIN_EVIDENCE - 1` iterations from costing
-/// a pass over every root candidate on every iteration of it.
+/// The mean claim can hold at any `remaining`, so unlike the tier claim there
+/// is no count of iterations that rules a proof out in advance. Kept as a named
+/// predicate so the caller reads the same way it did when there was one.
 pub(crate) fn out_of_reach_possible(remaining: u32) -> bool {
-    remaining < MIN_EVIDENCE
+    remaining > 0
 }
 
 #[cfg(test)]
@@ -364,20 +395,86 @@ mod tests {
     fn the_tier_bound_is_what_is_left_of_the_proof() {
         let leader = Candidate::new(4000, 4000, 2000.0);
         let stranger = Candidate::new(1, 1, 1.0);
-        assert!(out_of_reach(&leader, &stranger, MIN_EVIDENCE - 2));
-        assert!(!out_of_reach(&leader, &stranger, MIN_EVIDENCE - 1));
+        assert!(out_of_reach(
+            &leader,
+            &stranger,
+            MIN_EVIDENCE - 2,
+            RewardRange { lo: 0.0, hi: 1.0 }
+        ));
+        // One iteration short of the bar the tier claim lapses, and this
+        // stranger is close enough on the mean that the other claim does not
+        // cover it either.
+        let close = Candidate::new(1, 1, 1.0);
+        assert!(!out_of_reach(
+            &leader,
+            &close,
+            MIN_EVIDENCE - 1,
+            RewardRange { lo: 0.0, hi: 1.0 }
+        ));
     }
 
-    /// Nothing else is proved. A challenger already over the bar is ranked on a
-    /// mean no count bounds, however far behind it is; and a leader under the
-    /// bar proves nothing about anyone.
+    /// A challenger over the bar is ranked on its mean, which the declared
+    /// reward range bounds now that every reward is clamped into it: paying the
+    /// ceiling on every remaining iteration is the best it can do.
     #[test]
-    fn a_mean_is_never_proved() {
+    fn a_mean_far_enough_behind_is_proved() {
+        let leader = Candidate::new(9000, 9000, 8100.0); // mean 0.90
+        let established = Candidate::new(MIN_EVIDENCE, 9000, 0.0); // mean 0.00
+                                                                   // 32 visits at 0 plus one at the ceiling is 1/33; the leader's floor is
+                                                                   // 8100/9001. Not close.
+        assert!(out_of_reach(
+            &leader,
+            &established,
+            1,
+            RewardRange { lo: 0.0, hi: 1.0 }
+        ));
+    }
+
+    /// And is not proved while the ceiling still reaches. Same leader, same
+    /// challenger, enough iterations left to carry it past.
+    #[test]
+    fn a_mean_within_reach_is_not_proved() {
         let leader = Candidate::new(9000, 9000, 8100.0);
         let established = Candidate::new(MIN_EVIDENCE, 9000, 0.0);
-        assert!(!out_of_reach(&leader, &established, 1));
+        assert!(!out_of_reach(
+            &leader,
+            &established,
+            100_000,
+            RewardRange { lo: 0.0, hi: 1.0 }
+        ));
+    }
 
+    /// A wider declared range is a weaker bound: the same pair is proved inside
+    /// `[0, 1]` and not inside `[0, 100]`, because the ceiling the challenger is
+    /// allowed to reach for is a hundred times higher.
+    #[test]
+    fn an_over_declared_range_proves_less() {
+        let leader = Candidate::new(9000, 9000, 8100.0);
+        let established = Candidate::new(MIN_EVIDENCE, 9000, 0.0);
+        assert!(out_of_reach(
+            &leader,
+            &established,
+            1,
+            RewardRange { lo: 0.0, hi: 1.0 }
+        ));
+        assert!(!out_of_reach(
+            &leader,
+            &established,
+            1,
+            RewardRange { lo: 0.0, hi: 100.0 }
+        ));
+    }
+
+    /// A leader under the bar proves nothing about anyone: its own rank is a
+    /// mean, and nothing here bounds the tier it ends in.
+    #[test]
+    fn an_unestablished_leader_proves_nothing() {
         let thin = Candidate::new(MIN_EVIDENCE - 1, MIN_EVIDENCE - 1, 31.0);
-        assert!(!out_of_reach(&thin, &Candidate::new(1, 4000, 0.0), 1));
+        assert!(!out_of_reach(
+            &thin,
+            &Candidate::new(1, 4000, 0.0),
+            1,
+            RewardRange { lo: 0.0, hi: 1.0 }
+        ));
     }
 }

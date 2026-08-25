@@ -30,3 +30,21 @@ pub(crate) fn hash_of<T: Hash + ?Sized>(value: &T) -> u64 {
 pub(crate) fn uniform_01<R: Rng + ?Sized>(rng: &mut R) -> f64 {
     (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
+
+/// `reward` confined to the range the game declared.
+///
+/// Written out rather than `f64::clamp`, which propagates NaN: a poisoned
+/// reward has to land somewhere in range, or the accumulators it reaches stop
+/// being bounded and the early-termination proof built on that bound stops
+/// holding. NaN takes the floor, which is the reading that cannot make a rival
+/// look better than it is.
+#[inline(always)]
+pub(crate) fn clamp_reward(reward: f64, lo: f64, hi: f64) -> f64 {
+    if reward.is_nan() || reward < lo {
+        lo
+    } else if reward > hi {
+        hi
+    } else {
+        reward
+    }
+}

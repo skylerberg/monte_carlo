@@ -1,6 +1,33 @@
 use crate::game::{Game, PlayerSet};
+
+/// Whether the caller should ask [`settled`] at this root visit count.
+///
+/// The proof is a pass over every root candidate, and it holds at any
+/// `remaining` rather than only under the evidence bar, so asking every
+/// iteration is most of what early termination costs at a wide root -- a
+/// 200-child root at a 5000 budget pays a million candidate rankings for it.
+///
+/// So the rate is not flat. Inside the last [`MIN_EVIDENCE`] iterations every
+/// visit is asked, because that is the window the counting claim lives in and
+/// it is narrow enough that skipping any of it loses proofs outright. Before
+/// that only the mean claim can fire, and one that fires seven iterations late
+/// costs seven iterations.
+///
+/// An interval has to be shorter than the budgets it shortens: the one this
+/// crate shipped first was 1024, which never fired at all for a consumer
+/// running 100 iterations. This lives beside the caller rather than inside
+/// [`settled`] so the predicate stays a question about the root and not about
+/// how often it happens to be asked.
+pub(crate) fn worth_asking(visits: u32, target: u32) -> bool {
+    target.saturating_sub(visits) < MIN_EVIDENCE || visits.is_multiple_of(SPARSE_INTERVAL)
+}
+
+/// How often the mean claim is tested before the counting window opens.
+const SPARSE_INTERVAL: u32 = 8;
 use crate::node::Node;
-use crate::rank::{leader_of, out_of_reach, out_of_reach_possible, Candidate};
+use crate::rank::{
+    leader_of, out_of_reach, out_of_reach_possible, Candidate, RewardRange, MIN_EVIDENCE,
+};
 
 /// Whether the candidate the root would answer with is already guaranteed, so
 /// the remaining iterations cannot change the answer.
@@ -71,6 +98,7 @@ pub(crate) fn settled<G: Game>(
     target: u32,
     legal: &[bool],
     complete: bool,
+    range: RewardRange,
 ) -> bool {
     // Spending the budget is not a proof. The loop's own budget test reports
     // that as `StopReason::Budget` on the next pass; answering `true` here
@@ -125,6 +153,7 @@ pub(crate) fn settled<G: Game>(
                     )
                 }),
             remaining,
+            range,
         );
     }
 
@@ -145,6 +174,7 @@ pub(crate) fn settled<G: Game>(
                 )
             }),
         remaining,
+        range,
     )
 }
 
@@ -154,16 +184,13 @@ pub(crate) fn settled<G: Game>(
 /// Two passes over the same iterator rather than one over a materialized slice:
 /// this runs once per iteration on the hot path, and neither a root's children
 /// nor a slot's arms is a slice of the statistics the ranking reads.
-fn proven<I>(mut candidates: I, remaining: u32) -> bool
+fn proven<I>(mut candidates: I, remaining: u32, range: RewardRange) -> bool
 where
     I: Iterator<Item = (usize, Candidate)> + Clone,
 {
-    // While every challenger can still reach the evidence bar, the only root
-    // this proves is one with no challenger on it, and both scans below are a
-    // pass over every root candidate spent to answer `false`. This runs once
-    // per iteration on the hot path and the proof can shorten a budget by at
-    // most `MIN_EVIDENCE - 1` iterations, so the scan it saves is most of what
-    // early termination costs at a wide root.
+    // The scan cannot be skipped on a count any more: the mean claim can hold at
+    // any `remaining`, which is the point of restoring it. What is left is the
+    // one case worth answering without ranking anything.
     if !out_of_reach_possible(remaining) {
         let mut sole = candidates.clone();
         return matches!(sole.next(), Some((_, only)) if only.visits() > 0)
@@ -172,7 +199,8 @@ where
     let Some((at, leader)) = leader_of(candidates.clone()) else {
         return false;
     };
-    candidates.all(|(i, challenger)| i == at || out_of_reach(&leader, &challenger, remaining))
+    candidates
+        .all(|(i, challenger)| i == at || out_of_reach(&leader, &challenger, remaining, range))
 }
 
 #[cfg(test)]
@@ -253,7 +281,8 @@ mod tests {
             0,
             TARGET,
             &[true, true, false],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
         // The same counts with that child legal are a proof, which is what makes
         // the mask above the reason and not a coincidence.
@@ -263,7 +292,8 @@ mod tests {
             0,
             TARGET,
             &[true, true, true],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
     }
 
@@ -284,7 +314,8 @@ mod tests {
             0,
             reachable,
             &[true, true, true],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
         assert!(settled::<Ply>(
             &root,
@@ -292,7 +323,8 @@ mod tests {
             0,
             reachable - 1,
             &[true, true, true],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
     }
 
@@ -301,14 +333,23 @@ mod tests {
     #[test]
     fn a_mask_of_the_wrong_length_proves_nothing() {
         let root = root(CHILDREN);
-        assert!(!settled::<Ply>(&root, None, 0, TARGET, &[true, true], true));
+        assert!(!settled::<Ply>(
+            &root,
+            None,
+            0,
+            TARGET,
+            &[true, true],
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
+        ));
         assert!(!settled::<Ply>(
             &root,
             None,
             0,
             TARGET,
             &[true, true, true, true],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
     }
 
@@ -324,7 +365,8 @@ mod tests {
             0,
             TARGET,
             &[true, true, true],
-            false
+            false,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
     }
 
@@ -345,7 +387,8 @@ mod tests {
             0,
             far,
             &[false, false, true],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
         // An unvisited lone candidate is no answer, so it is no proof either.
         let empty = root([(0, 400, 0.0), (5, 400, 0.2), (390, 400, 0.5)]);
@@ -355,7 +398,8 @@ mod tests {
             0,
             far,
             &[true, false, false],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
         // Add one rival and the same budget proves nothing at all.
         assert!(!settled::<Ply>(
@@ -364,7 +408,8 @@ mod tests {
             0,
             far,
             &[false, true, true],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
     }
 
@@ -379,7 +424,8 @@ mod tests {
             0,
             405,
             &[true, true, true],
-            true
+            true,
+            RewardRange { lo: 0.0, hi: 1.0 }
         ));
     }
 }

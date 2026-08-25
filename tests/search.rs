@@ -2121,3 +2121,97 @@ fn a_pooled_search_reports_the_deadline_a_worker_stopped_for() {
         assert_eq!(result.iterations_used, 0);
     }
 }
+
+/// A game that pays outside the range it declares.
+///
+/// Not a contrived one: a heuristic evaluation that is meant to be normalised
+/// and is not, or a caller who declares `[0, 1]` and returns a raw score, both
+/// land here. The declared range is what `Duct`'s tie tolerance, regret
+/// matching's normalisation and the early-termination proof are all measured
+/// against, so a payoff outside it is not a slightly-off number, it is a number
+/// those three read as a different quantity.
+#[derive(Clone, Default)]
+struct PaysOutOfRange {
+    done: bool,
+}
+
+impl PaysOutOfRange {
+    const DECLARED_MAX: f64 = 1.0;
+    /// Five times the declared ceiling.
+    const ACTUAL_PAY: f64 = 5.0;
+}
+
+impl mcts::Game for PaysOutOfRange {
+    type Choice = usize;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> mcts::Status<[f64; 2]> {
+        if self.done {
+            mcts::Status::Terminal([Self::ACTUAL_PAY; 2])
+        } else {
+            mcts::Status::Active { player: 0 }
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<usize>) {
+        if !self.done {
+            out.extend([0, 1]);
+        }
+    }
+
+    fn apply_choice<R: mcts::rand_core::Rng + ?Sized>(&mut self, _: &(), _: &usize, _: &mut R) {
+        self.done = true;
+    }
+
+    fn rollout<R: mcts::rand_core::Rng + ?Sized>(&mut self, _: &(), _: &mut R) -> [f64; 2] {
+        [Self::ACTUAL_PAY; 2]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: mcts::rand_core::Rng + ?Sized>(
+        &self,
+        dest: &mut Self,
+        _: &(),
+        _: u8,
+        _: &mut R,
+    ) {
+        dest.clone_from(self);
+    }
+}
+
+/// The declared range is enforced, not merely believed.
+///
+/// Without the clamp the root's mean is the 5.0 the game pays, five times the
+/// ceiling it declared, and every quantity measured against that range is
+/// reading a number off a different scale. The early-termination proof is the
+/// sharpest case: it bounds a rival's mean by the declared ceiling, which is
+/// only a bound if the accumulators respect it.
+#[test]
+fn a_reward_outside_the_declared_range_is_clamped_into_it() {
+    let game = PaysOutOfRange::default();
+    let cfg = Config {
+        min_reward: 0.0,
+        max_reward: PaysOutOfRange::DECLARED_MAX,
+        ..config(200)
+    };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &(), 0, &cfg, None, &mut rng(1));
+
+    let root = searcher.tree().expect("a search leaves a tree");
+    assert!(
+        root.mean_reward() <= PaysOutOfRange::DECLARED_MAX,
+        "the root's mean is {}, above the declared ceiling of {}",
+        root.mean_reward(),
+        PaysOutOfRange::DECLARED_MAX
+    );
+    assert_eq!(
+        result.best_mean_reward,
+        PaysOutOfRange::DECLARED_MAX,
+        "every payoff is above the ceiling, so every clamped one is the ceiling"
+    );
+}
