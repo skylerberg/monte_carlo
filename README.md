@@ -204,6 +204,33 @@ to say how a game starts and how genes become a search context. [`Ga`] and
 correlated continuous weights, because it learns the shape of the region worth
 sampling rather than recombining coordinates independently.
 
+**Who the candidates play decides what fitness means.** Against a fixed baseline
+(`Opponents::Baseline`) a score is absolute and comparable across the whole run,
+which is what you read progress from — but it has a ceiling, and runs reach it.
+Once the population beats the baseline nine times in ten, every candidate scores
+between 0.88 and 0.95, the gaps between them are smaller than the standard error
+on each measurement, and selection is ranking noise. Underneath that sits a
+second problem: candidates are rewarded for punishing the *particular* opponent
+they all face, which is not the same as being strong.
+
+`Opponents::RoundRobin` plays every candidate against every other. The field
+improves with the population, so there is no ceiling and no fixed opponent to
+specialise against. It is also cheaper than it looks — each game scores two
+candidates, so at equal cost every candidate is measured on twice as many games.
+What it costs is the absolute scale: scores are zero sum within the field, the
+population mean is 0.5 in every generation by construction, and a 0.62 late in a
+run was earned against much stronger opposition than a 0.62 early on. Progress
+has to be measured separately, by playing a generation's output against fixed
+weights. It also brings the co-evolutionary risk of cycling — three strategies
+each beating one of the others can chase each other in circles — which shows up
+as lively fitness with parameters that keep returning to values they already
+held.
+
+That difference reaches further than the fitness column: with a moving field the
+highest score of the run is not the run's answer, because an early generation
+won its score against weaker opposition. `run` reports the latest generation
+under `RoundRobin` and the historical maximum under `Baseline`.
+
 **Fitness is a win rate, so it is noisy, and that governs everything else.** The
 standard error over `n` games is at worst `sqrt(0.25 / n)` — 2.5 percentage
 points even at 400 games. With `sigma_f` the spread of true strength across a
