@@ -28,9 +28,12 @@ pub trait Tunable: Clone + Send + Sync {
     /// the only thing standing between the optimizer's unconstrained proposals
     /// and [`Tunable::with_genes`].
     ///
-    /// Prefer clamping to a small positive floor over clamping to exactly zero
-    /// for anything a mutation scales multiplicatively: zero is absorbing under
-    /// multiplication, so a gene that reaches it can never move again.
+    /// Clamping to exactly zero is safe here. Mutation is additive and
+    /// [`Tunable::gene_scales`] gives a zeroed gene a step borrowed from its
+    /// neighbours, so zero is a value the search can leave again rather than one
+    /// it falls into. That is not true of every optimizer — under multiplicative
+    /// mutation zero is absorbing — so it is a property of this crate worth
+    /// knowing rather than one to rely on generally.
     fn repair(genes: &mut [f64]) {
         let _ = genes;
     }
@@ -39,18 +42,35 @@ pub trait Tunable: Clone + Send + Sync {
     ///
     /// Sets the initial step size per coordinate, so it is what lets a run mix
     /// a weight around `12.0` with a probability around `0.05` without the
-    /// small one being ignored. The default — each gene's own magnitude, with a
-    /// floor so a gene seeded at zero can still move — is reasonable when every
-    /// parameter is a weight on the same scale.
+    /// small one being ignored.
+    ///
+    /// The default is each gene's own magnitude, and for a gene seeded at zero
+    /// — which has no magnitude to take a step from — the median of the others.
+    /// A hardcoded floor is the tempting answer there and the wrong one: it is
+    /// only right for parameters that happen to be near it, and where the rest
+    /// of the vector sits around `5.0` a floor of `1e-3` leaves that gene taking
+    /// steps ten thousand times too small to get anywhere. Additive mutation
+    /// means such a gene can move in principle; a step that size means it never
+    /// does in practice, and the run reports it as a weight the search chose to
+    /// leave alone. Borrowing the typical magnitude keeps the rule scale-free:
+    /// it reads the same whether the weights are thousandths or thousands.
     fn gene_scales(&self) -> Vec<f64> {
-        self.to_genes()
-            .iter()
-            .map(|gene| {
-                let magnitude = gene.abs();
-                if magnitude > 1e-6 {
+        let magnitudes: Vec<f64> = self.to_genes().iter().map(|gene| gene.abs()).collect();
+
+        let mut known: Vec<f64> = magnitudes.iter().copied().filter(|m| *m > 1e-12).collect();
+        known.sort_by(|a, b| a.partial_cmp(b).expect("a magnitude is never NaN"));
+        // Median rather than mean: one weight an order of magnitude above the
+        // rest should not drag every zeroed gene up with it. All-zero
+        // parameters have nothing to borrow from, so they fall back to one.
+        let typical = known.get(known.len() / 2).copied().unwrap_or(1.0);
+
+        magnitudes
+            .into_iter()
+            .map(|magnitude| {
+                if magnitude > 1e-12 {
                     magnitude
                 } else {
-                    1e-3
+                    typical
                 }
             })
             .collect()

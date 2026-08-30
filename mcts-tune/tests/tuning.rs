@@ -318,6 +318,69 @@ fn maximize<O: Optimizer>(
     (genes.to_vec(), fitness)
 }
 
+/// A gene seeded at zero has no magnitude of its own, and the step size it gets
+/// instead decides whether it is tunable or frozen. The median of its
+/// neighbours puts it in the same range as the rest of the vector.
+#[test]
+fn a_zero_gene_borrows_its_step_from_its_neighbours() {
+    let scales = Beliefs {
+        kind_zero: 0.0,
+        kind_one: 4.0,
+    }
+    .gene_scales();
+    assert_eq!(scales, vec![4.0, 4.0]);
+
+    // Nothing to borrow from falls back to one rather than to zero, which would
+    // freeze the whole vector.
+    let empty = Beliefs {
+        kind_zero: 0.0,
+        kind_one: 0.0,
+    }
+    .gene_scales();
+    assert_eq!(empty, vec![1.0, 1.0]);
+}
+
+/// The behaviour the step size exists for: a weight seeded at zero has to be
+/// able to reach a useful value. Under the old hardcoded `1e-3` floor this gene
+/// moved about 0.00025 per mutation and stayed at zero for any run anyone would
+/// actually wait for.
+#[test]
+fn both_optimizers_move_a_gene_off_zero() {
+    let start = Beliefs {
+        kind_zero: 0.0,
+        kind_one: 4.0,
+    };
+    let target = [7.0, 2.0];
+
+    let mut cma = CmaEs::new(
+        &start,
+        CmaParams {
+            seed: 9,
+            ..CmaParams::default()
+        },
+    );
+    let (genes, _) = maximize(&mut cma, &target, 120);
+    assert!(
+        (genes[0] - target[0]).abs() < 0.5,
+        "cma-es left the zeroed gene at {}",
+        genes[0]
+    );
+
+    let mut ga = Ga::new(
+        &start,
+        GaParams {
+            seed: 9,
+            ..GaParams::default()
+        },
+    );
+    let (genes, _) = maximize(&mut ga, &target, 120);
+    assert!(
+        genes[0] > 3.0,
+        "the ga left the zeroed gene at {}",
+        genes[0]
+    );
+}
+
 #[test]
 fn cma_es_closes_on_a_known_optimum() {
     let start = Beliefs {
