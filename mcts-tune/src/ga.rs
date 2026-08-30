@@ -2,12 +2,12 @@ use mcts::rand_core::SeedableRng;
 use wyrand::WyRand;
 
 use crate::optimizer::Optimizer;
-use crate::resume::{maybe_infinite, ResumeError, Snapshot};
+use crate::resume::{exact, ResumeError, Snapshot};
 use crate::sampling::{index, standard_normal, uniform};
 use crate::tunable::Tunable;
 
 /// Knobs for [`Ga`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GaParams {
     pub population: usize,
     /// Candidates carried into the next generation untouched. Without at least
@@ -52,14 +52,25 @@ impl Default for GaParams {
 /// cannot move a gene that has reached zero, so any parameter clamped to zero
 /// by a repair is frozen there for the rest of the run — silently, and looking
 /// exactly like a parameter the search decided to leave alone.
-#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ga {
     params: GaParams,
     scales: Vec<f64>,
     population: Vec<Vec<f64>>,
     rng: WyRand,
     best_genes: Vec<f64>,
-    #[serde(with = "maybe_infinite")]
+    best_fitness: f64,
+}
+
+/// What a checkpoint carries. The knobs and the per-gene scales come back from
+/// the constructor, so only what the run has bred travels through the file.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GaState {
+    #[serde(with = "exact::matrix")]
+    population: Vec<Vec<f64>>,
+    rng: WyRand,
+    #[serde(with = "exact::vector")]
+    best_genes: Vec<f64>,
+    #[serde(with = "exact::scalar")]
     best_fitness: f64,
 }
 
@@ -199,12 +210,41 @@ impl Optimizer for Ga {
     }
 
     fn snapshot(&self) -> serde_json::Value {
-        serde_json::to_value(Snapshot::new(self.name(), self.scales.len(), self))
+        let state = GaState {
+            population: self.population.clone(),
+            rng: self.rng.clone(),
+            best_genes: self.best_genes.clone(),
+            best_fitness: self.best_fitness,
+        };
+        serde_json::to_value(Snapshot::new(self.name(), self.scales.len(), &state))
             .expect("a snapshot serializes")
     }
 
     fn restore(&mut self, snapshot: &serde_json::Value) -> Result<(), ResumeError> {
-        *self = Snapshot::open(snapshot, self.name(), self.scales.len())?;
+        let state: GaState = Snapshot::open(snapshot, self.name(), self.scales.len())?;
+        if state.population.len() != self.params.population {
+            return Err(ResumeError::Malformed(format!(
+                "the checkpoint holds a population of {} and this run is set to {}",
+                state.population.len(),
+                self.params.population
+            )));
+        }
+        if let Some(row) = state
+            .population
+            .iter()
+            .find(|row| row.len() != self.scales.len())
+        {
+            return Err(ResumeError::Malformed(format!(
+                "the checkpoint holds a candidate of {} genes where {} are expected",
+                row.len(),
+                self.scales.len()
+            )));
+        }
+
+        self.population = state.population;
+        self.rng = state.rng;
+        self.best_genes = state.best_genes;
+        self.best_fitness = state.best_fitness;
         Ok(())
     }
 }

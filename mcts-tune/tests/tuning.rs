@@ -510,6 +510,20 @@ fn resume_config(generations: usize) -> TuneConfig {
     }
 }
 
+/// A checkpoint as a caller actually keeps one: written to text and parsed
+/// back.
+///
+/// Every resume test goes through this rather than passing the in-memory value
+/// straight back. Handing the `Checkpoint` object over directly tests a code
+/// path nobody uses, and it hides the whole class of bug where the state
+/// survives in memory and not on disk — which is exactly what
+/// `serde_json`'s float parser does to a run that stores its numbers as JSON
+/// numbers.
+fn through_a_file(checkpoint: &Checkpoint) -> Checkpoint {
+    let text = serde_json::to_string(checkpoint).expect("a checkpoint serializes");
+    serde_json::from_str(&text).expect("a checkpoint parses")
+}
+
 fn resume_params() -> CmaParams {
     CmaParams {
         population: 4,
@@ -544,7 +558,7 @@ fn a_resumed_run_continues_exactly_where_it_stopped() {
     let mut saved: Option<Checkpoint> = None;
     mcts_tune::run(&table, &mut before, &resume_config(3), None, |generation| {
         split.push((generation.generation, generation.best_fitness));
-        saved = Some(generation.checkpoint.clone());
+        saved = Some(through_a_file(&generation.checkpoint));
     })
     .expect("a fresh run cannot fail to resume");
 
@@ -662,4 +676,49 @@ fn an_unmeasured_optimizer_still_round_trips() {
     let read: serde_json::Value = serde_json::from_str(&text).expect("parses");
     optimizer.restore(&read).expect("restores");
     assert_eq!(optimizer.best().1, f64::NEG_INFINITY);
+}
+
+/// The bug this guards against is not hypothetical: `serde_json` writes an
+/// `f64` correctly and reads it back up to one unit in the last place away. A
+/// checkpoint holding its numbers as JSON numbers therefore restores *nearly*
+/// the state it saved, and a search that compounds its state every generation
+/// turns "nearly" into a different run.
+#[test]
+fn checkpointed_floats_survive_text_exactly() {
+    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let candidates = optimizer.ask();
+    let fitness: Vec<f64> = (0..candidates.len()).map(|i| i as f64 * 0.37).collect();
+    optimizer.tell(&candidates, &fitness);
+
+    let text = serde_json::to_string(&optimizer.snapshot()).expect("serializes");
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+    assert_eq!(
+        parsed,
+        optimizer.snapshot(),
+        "the snapshot changed on its way through text"
+    );
+
+    // And the values a plain JSON number would have damaged are the ones that
+    // decide the next candidate.
+    let mut restored = CmaEs::new(&inverted(), resume_params());
+    restored.restore(&parsed).expect("restores");
+    assert_eq!(restored.snapshot(), optimizer.snapshot());
+}
+
+#[test]
+fn a_checkpoint_for_a_different_population_is_refused() {
+    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let snapshot = optimizer.snapshot();
+
+    let mut wider = CmaEs::new(
+        &inverted(),
+        CmaParams {
+            population: 8,
+            ..resume_params()
+        },
+    );
+    assert!(matches!(
+        wider.restore(&snapshot),
+        Err(ResumeError::Malformed(_))
+    ));
 }

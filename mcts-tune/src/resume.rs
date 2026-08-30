@@ -99,24 +99,77 @@ impl Snapshot {
     }
 }
 
-/// `f64::NEG_INFINITY` as JSON `null`, which is the only value here that JSON
-/// cannot carry.
+/// Floating point as its exact bit pattern.
 ///
-/// A fresh optimizer's best fitness is negative infinity — nothing measured yet
-/// — and `serde_json` writes that as `null` and then refuses to read it back as
-/// a number. Without this a checkpoint taken before the first generation would
-/// write cleanly and fail to load.
-pub mod maybe_infinite {
-    use serde::{Deserialize, Deserializer, Serializer};
+/// **`serde_json` does not round-trip `f64`.** Its writer is correct — the text
+/// it emits is the shortest decimal that names the value — but its parser is not
+/// correctly rounded, and reading that text back can land one unit in the last
+/// place away. A checkpoint written and reloaded through `serde_json`'s own
+/// numbers is therefore *nearly* the state that was saved, and for a search that
+/// compounds its state every generation, nearly is not a resume: one bit in a
+/// recombination weight moves the next candidate, which moves everything after
+/// it. Storing the bits sidesteps the parser entirely.
+///
+/// It also carries the infinities for free, which matters because a fresh
+/// optimizer's best fitness is negative infinity — a value JSON cannot express
+/// as a number at all, and which `serde_json` would otherwise write as `null`
+/// and refuse to read back.
+///
+/// The cost is a checkpoint no one can read. That is the right trade here: this
+/// file is machine state for resuming, and the parameters a human wants to look
+/// at are written separately, in the open, where a last-place difference cannot
+/// matter.
+pub mod exact {
+    /// One `f64`.
+    pub mod scalar {
+        use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(value: &f64, out: S) -> Result<S::Ok, S::Error> {
-        match value.is_finite() {
-            true => out.serialize_some(value),
-            false => out.serialize_none(),
+        pub fn serialize<S: Serializer>(value: &f64, out: S) -> Result<S::Ok, S::Error> {
+            out.serialize_u64(value.to_bits())
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(input: D) -> Result<f64, D::Error> {
+            Ok(f64::from_bits(u64::deserialize(input)?))
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(input: D) -> Result<f64, D::Error> {
-        Ok(Option::<f64>::deserialize(input)?.unwrap_or(f64::NEG_INFINITY))
+    /// A row of `f64`.
+    pub mod vector {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(value: &[f64], out: S) -> Result<S::Ok, S::Error> {
+            value
+                .iter()
+                .map(|entry| entry.to_bits())
+                .collect::<Vec<_>>()
+                .serialize(out)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(input: D) -> Result<Vec<f64>, D::Error> {
+            Ok(Vec::<u64>::deserialize(input)?
+                .into_iter()
+                .map(f64::from_bits)
+                .collect())
+        }
+    }
+
+    /// Rows of `f64`.
+    pub mod matrix {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(value: &[Vec<f64>], out: S) -> Result<S::Ok, S::Error> {
+            value
+                .iter()
+                .map(|row| row.iter().map(|entry| entry.to_bits()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+                .serialize(out)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(input: D) -> Result<Vec<Vec<f64>>, D::Error> {
+            Ok(Vec::<Vec<u64>>::deserialize(input)?
+                .into_iter()
+                .map(|row| row.into_iter().map(f64::from_bits).collect())
+                .collect())
+        }
     }
 }

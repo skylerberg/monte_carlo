@@ -3,13 +3,13 @@ use wyrand::WyRand;
 
 use crate::eigen::symmetric_eigen;
 use crate::optimizer::Optimizer;
-use crate::resume::{maybe_infinite, ResumeError, Snapshot};
+use crate::resume::{exact, ResumeError, Snapshot};
 use crate::sampling::standard_normal;
 use crate::tunable::Tunable;
 
 /// Knobs for [`CmaEs`]. The defaults are the standard ones and are rarely worth
 /// touching — the strategy derives almost everything from the dimension.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CmaParams {
     /// Candidates per generation. Zero picks the standard `4 + floor(3 ln n)`.
     ///
@@ -50,7 +50,6 @@ impl Default for CmaParams {
 /// Per-parameter scale is carried in the initial covariance, `diag(scales²)`,
 /// which is what lets a weight near 12 and a probability near 0.05 be tuned in
 /// the same run without the small one being swamped.
-#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CmaEs {
     n: usize,
     lambda: usize,
@@ -78,7 +77,42 @@ pub struct CmaEs {
     generation: u32,
     rng: WyRand,
     best_genes: Vec<f64>,
-    #[serde(with = "maybe_infinite")]
+    best_fitness: f64,
+}
+
+/// What a checkpoint carries: the state the search has *evolved*, and nothing
+/// else.
+///
+/// Everything derived — the population size, the recombination weights, the
+/// learning rates — is a pure function of the dimension and [`CmaParams`], so
+/// the constructor recomputes it and a checkpoint never carries it. That is not
+/// only tidier. A derived constant that travels through a file can come back
+/// disagreeing with the code that recomputes it, and a recombination weight one
+/// bit out is enough to move every candidate after the resume.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CmaState {
+    /// Checked rather than restored: resuming with a different population would
+    /// change the strategy's whole character while looking like a continuation.
+    lambda: usize,
+    #[serde(with = "exact::vector")]
+    mean: Vec<f64>,
+    #[serde(with = "exact::scalar")]
+    sigma: f64,
+    #[serde(with = "exact::vector")]
+    cov: Vec<f64>,
+    #[serde(with = "exact::vector")]
+    basis: Vec<f64>,
+    #[serde(with = "exact::vector")]
+    spread: Vec<f64>,
+    #[serde(with = "exact::vector")]
+    p_sigma: Vec<f64>,
+    #[serde(with = "exact::vector")]
+    p_c: Vec<f64>,
+    generation: u32,
+    rng: WyRand,
+    #[serde(with = "exact::vector")]
+    best_genes: Vec<f64>,
+    #[serde(with = "exact::scalar")]
     best_fitness: f64,
 }
 
@@ -371,12 +405,60 @@ impl Optimizer for CmaEs {
     }
 
     fn snapshot(&self) -> serde_json::Value {
-        serde_json::to_value(Snapshot::new(self.name(), self.n, self))
+        let state = CmaState {
+            lambda: self.lambda,
+            mean: self.mean.clone(),
+            sigma: self.sigma,
+            cov: self.cov.clone(),
+            basis: self.basis.clone(),
+            spread: self.spread.clone(),
+            p_sigma: self.p_sigma.clone(),
+            p_c: self.p_c.clone(),
+            generation: self.generation,
+            rng: self.rng.clone(),
+            best_genes: self.best_genes.clone(),
+            best_fitness: self.best_fitness,
+        };
+        serde_json::to_value(Snapshot::new(self.name(), self.n, &state))
             .expect("a snapshot serializes")
     }
 
     fn restore(&mut self, snapshot: &serde_json::Value) -> Result<(), ResumeError> {
-        *self = Snapshot::open(snapshot, self.name(), self.n)?;
+        let state: CmaState = Snapshot::open(snapshot, self.name(), self.n)?;
+        if state.lambda != self.lambda {
+            return Err(ResumeError::Malformed(format!(
+                "the checkpoint ran {} candidates a generation and this run is set to {}",
+                state.lambda, self.lambda
+            )));
+        }
+        let n = self.n;
+        for (field, found, expected) in [
+            ("mean", state.mean.len(), n),
+            ("sigma path", state.p_sigma.len(), n),
+            ("covariance path", state.p_c.len(), n),
+            ("best genes", state.best_genes.len(), n),
+            ("eigenvalues", state.spread.len(), n),
+            ("covariance", state.cov.len(), n * n),
+            ("basis", state.basis.len(), n * n),
+        ] {
+            if found != expected {
+                return Err(ResumeError::Malformed(format!(
+                    "the checkpoint's {field} holds {found} entries where {expected} are expected"
+                )));
+            }
+        }
+
+        self.mean = state.mean;
+        self.sigma = state.sigma;
+        self.cov = state.cov;
+        self.basis = state.basis;
+        self.spread = state.spread;
+        self.p_sigma = state.p_sigma;
+        self.p_c = state.p_c;
+        self.generation = state.generation;
+        self.rng = state.rng;
+        self.best_genes = state.best_genes;
+        self.best_fitness = state.best_fitness;
         Ok(())
     }
 }

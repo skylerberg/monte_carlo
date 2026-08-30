@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::arena::{evaluate, Evaluation, Match};
 use crate::optimizer::Optimizer;
-use crate::resume::{maybe_infinite, ResumeError};
+use crate::resume::{exact, ResumeError};
 use crate::tunable::Tunable;
 
 /// Everything needed to continue a run that was interrupted.
@@ -28,9 +28,11 @@ pub struct Checkpoint {
     /// The genes every candidate was measured against.
     ///
     /// Checked on resume, because fitness only means anything relative to this.
+    #[serde(with = "exact::vector")]
     pub baseline: Vec<f64>,
+    #[serde(with = "exact::vector")]
     pub best_genes: Vec<f64>,
-    #[serde(with = "maybe_infinite")]
+    #[serde(with = "exact::scalar")]
     pub best_fitness: f64,
 }
 
