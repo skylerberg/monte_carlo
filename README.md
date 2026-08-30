@@ -193,9 +193,9 @@ wasm consumer should not pay for it.
 
 ```rust
 let mut optimizer = CmaEs::new(&base_params, CmaParams::default());
-let report = mcts_tune::run(&arena, &mut optimizer, &config, |generation| {
-    // checkpoint however you like; the crate writes no files
-});
+let report = mcts_tune::run(&arena, &mut optimizer, &config, resume, |generation| {
+    // persist generation.checkpoint however you like; the crate writes no files
+})?;
 ```
 
 Implement [`Tunable`] to map a parameter struct to a gene vector and [`Match`]
@@ -217,6 +217,24 @@ towards it. Two things follow, and both are built in:
 - Variance reduction is free strength. Every candidate in a generation plays the
   *same* seeds, and every matchup is played from both seats, so the comparison
   carries neither each candidate's own luck nor the first-move advantage.
+
+**Runs are resumable.** Every [`GenerationReport`] carries a [`Checkpoint`]
+holding the optimizer's own state — for CMA-ES the adapted covariance and step
+size, which is the part an interruption would otherwise cost and the whole
+reason to use the strategy. Persist it and pass it back as `resume`. Re-centring
+a fresh optimizer on the best parameters found so far is *not* the same thing:
+the covariance resets to diagonal, the step size resets, and the search starts
+over from a good point rather than continuing. A resumed run reproduces the
+uninterrupted one exactly, generator state included, which is what the suite
+checks.
+
+Resuming is refused rather than approximated when the checkpoint does not belong
+to the run: a different strategy, a different number of genes, or — the one that
+actually catches people — a different baseline. Fitness is a win rate *against
+the baseline*, so resuming with the previous run's output as the seed parameters
+would restart the scale at even money and make every number after the resume
+incomparable with every number before it, while looking in the log exactly like
+a run that collapsed.
 
 Two failure modes worth knowing before trusting a result. Parameters that are
 symmetric in the real game but come back differentiated are the run fitting

@@ -32,6 +32,20 @@ pub trait Optimizer {
     /// before it starts.
     fn population(&self) -> usize;
 
-    /// Name for logs.
+    /// Name for logs, and the tag that stops one strategy's checkpoint being
+    /// loaded into another.
     fn name(&self) -> &'static str;
+
+    /// Everything this optimizer needs to carry on from here.
+    ///
+    /// A tuning run is measured in hours, so the state that decides whether an
+    /// interruption costs minutes or the whole run is the state in here: for a
+    /// covariance-adapting strategy that is the learned covariance, which is
+    /// the entire reason to use one. Re-centring a fresh optimizer on the best
+    /// parameters found so far is not the same thing and is not a resume.
+    fn snapshot(&self) -> serde_json::Value;
+
+    /// Restore state written by [`Optimizer::snapshot`] from the same strategy
+    /// at the same dimension.
+    fn restore(&mut self, snapshot: &serde_json::Value) -> Result<(), crate::ResumeError>;
 }

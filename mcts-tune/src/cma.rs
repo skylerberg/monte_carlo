@@ -3,12 +3,13 @@ use wyrand::WyRand;
 
 use crate::eigen::symmetric_eigen;
 use crate::optimizer::Optimizer;
+use crate::resume::{maybe_infinite, ResumeError, Snapshot};
 use crate::sampling::standard_normal;
 use crate::tunable::Tunable;
 
 /// Knobs for [`CmaEs`]. The defaults are the standard ones and are rarely worth
 /// touching — the strategy derives almost everything from the dimension.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CmaParams {
     /// Candidates per generation. Zero picks the standard `4 + floor(3 ln n)`.
     ///
@@ -49,6 +50,7 @@ impl Default for CmaParams {
 /// Per-parameter scale is carried in the initial covariance, `diag(scales²)`,
 /// which is what lets a weight near 12 and a probability near 0.05 be tuned in
 /// the same run without the small one being swamped.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CmaEs {
     n: usize,
     lambda: usize,
@@ -76,6 +78,7 @@ pub struct CmaEs {
     generation: u32,
     rng: WyRand,
     best_genes: Vec<f64>,
+    #[serde(with = "maybe_infinite")]
     best_fitness: f64,
 }
 
@@ -365,5 +368,15 @@ impl Optimizer for CmaEs {
 
     fn name(&self) -> &'static str {
         "cma-es"
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(Snapshot::new(self.name(), self.n, self))
+            .expect("a snapshot serializes")
+    }
+
+    fn restore(&mut self, snapshot: &serde_json::Value) -> Result<(), ResumeError> {
+        *self = Snapshot::open(snapshot, self.name(), self.n)?;
+        Ok(())
     }
 }
