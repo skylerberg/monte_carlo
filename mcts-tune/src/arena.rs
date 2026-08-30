@@ -130,6 +130,51 @@ pub fn play<M: Match>(
     }
 }
 
+/// Who the candidates are measured against.
+///
+/// The choice decides what a fitness number *means*, and the two meanings are
+/// not interchangeable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opponents {
+    /// Every candidate plays the run's starting parameters.
+    ///
+    /// Fitness is then an absolute number on a fixed scale, comparable across
+    /// the whole run: 0.62 in generation 40 really is better than 0.55 in
+    /// generation 3. That is the mode to read progress from.
+    ///
+    /// It has a ceiling, and runs hit it. Once the population beats the
+    /// baseline nine times in ten, every candidate scores between 0.88 and 0.95
+    /// and the gaps between them are smaller than the standard error on each
+    /// measurement — the ranking selection depends on becomes noise, and the
+    /// run stops improving because it has run out of measuring instrument
+    /// rather than because it has found anything. There is a second failure
+    /// underneath that one: candidates are rewarded for punishing the *specific*
+    /// opponent they all face, which is not the same as being strong.
+    Baseline,
+    /// Every candidate plays every other candidate.
+    ///
+    /// The field improves as the population does, so there is no ceiling to hit
+    /// and no fixed opponent to specialise against — the pressure is always to
+    /// beat the current best, whatever that has become.
+    ///
+    /// The cost is that fitness stops being an absolute number. Scores are
+    /// zero-sum within the field, so the population mean sits at 0.5 by
+    /// construction in every generation, and a 0.62 late in a run is measured
+    /// against much stronger opposition than a 0.62 early on. Progress cannot
+    /// be read from the fitness column; measure a generation's output against
+    /// fixed weights separately to see it.
+    ///
+    /// It is more efficient than it looks. Every game scores *two* candidates
+    /// rather than one, so at equal cost each candidate is measured on twice as
+    /// many games as it would be against a baseline.
+    ///
+    /// The risk it carries is cycling: with three strategies where each beats
+    /// one of the others, a population can chase itself in circles and improve
+    /// at nothing. Suspect it when fitness is lively but the parameters keep
+    /// returning to values they held before.
+    RoundRobin,
+}
+
 /// How much evidence to gather about each candidate.
 pub struct Evaluation {
     /// Games per candidate. The single most important number in a run: fitness
@@ -137,29 +182,37 @@ pub struct Evaluation {
     /// and a generation whose candidates differ by less than that is ranked by
     /// noise. Halve it and you need four times as many generations to make the
     /// same progress, which is a bad trade well before 200.
+    ///
+    /// Under [`Opponents::RoundRobin`] this counts games per *pairing*, so each
+    /// candidate is measured on `games * (candidates - 1)` of them and a
+    /// generation costs `games * candidates * (candidates - 1) / 2` in total.
     pub games: usize,
     /// Base seed for the shared game seeds. Changing it between generations
     /// trades a little variance reduction for protection against a candidate
     /// that happens to suit one fixed set of seeds.
     pub seed: u64,
     pub threads: usize,
+    pub opponents: Opponents,
 }
 
-/// Win rate for each candidate against `baseline`, on shared randomness.
+/// Win rate for each candidate, on shared randomness.
 ///
-/// Two variance reductions, both free:
+/// Two variance reductions, both free and applied in either mode:
 ///
 /// - **Common random numbers.** Game `g` is played from seed `seed + g` for
-///   *every* candidate, so candidates are compared on the same draws rather
-///   than each against its own luck. Without this the difference between two
-///   candidates carries both their sampling errors; with it, much of that
-///   cancels.
-/// - **Both seats.** The first half of the games seat the candidate first and
-///   the second half seat it second, so a first-move advantage lands on both
+///   *every* candidate and every pairing, so candidates are compared on the same
+///   draws rather than each against its own luck. Without this the difference
+///   between two candidates carries both their sampling errors; with it, much of
+///   that cancels.
+/// - **Both seats.** The first half of a matchup seats one candidate first and
+///   the second half seats it second, so a first-move advantage lands on both
 ///   sides of every comparison instead of being measured as strength.
 ///
-/// Scores come from [`Rewards::reward`] at the candidate's own seat, so nothing
+/// Scores come from [`Rewards::reward`] at each candidate's own seat, so nothing
 /// here assumes the game is zero sum.
+///
+/// `baseline` is used only by [`Opponents::Baseline`]; round-robin measures the
+/// candidates against each other and ignores it.
 pub fn evaluate<M: Match>(
     game: &M,
     candidates: &[Vec<f64>],
@@ -181,12 +234,37 @@ where
         .iter()
         .map(|genes| game.context_for(genes))
         .collect();
-    let baseline_context = game.context_for(baseline);
-    let half = plan.games / 2;
 
-    let total = candidates.len() * plan.games;
+    match plan.opponents {
+        Opponents::Baseline => {
+            let opponent = game.context_for(baseline);
+            against_one(game, &contexts, &opponent, plan)
+        }
+        Opponents::RoundRobin => {
+            assert!(
+                candidates.len() >= 2,
+                "mcts-tune: a round robin needs at least two candidates; with one there is \
+                 nobody to play"
+            );
+            against_each_other(game, &contexts, plan)
+        }
+    }
+}
+
+/// Every candidate against a single fixed opponent.
+fn against_one<M: Match>(
+    game: &M,
+    contexts: &[<M::Game as Game>::Context],
+    opponent: &<M::Game as Game>::Context,
+    plan: &Evaluation,
+) -> Vec<f64>
+where
+    <M::Game as Game>::Context: Sync,
+{
+    let half = plan.games / 2;
+    let total = contexts.len() * plan.games;
     let next = AtomicUsize::new(0);
-    let (next, contexts, baseline_context) = (&next, &contexts, &baseline_context);
+    let (next, contexts) = (&next, &contexts);
 
     let sums = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..plan.threads.max(1))
@@ -203,11 +281,11 @@ where
 
                         // The candidate takes seat 0 for the first half of its
                         // games and seat 1 for the second.
-                        let seat = if round < half { 0 } else { 1 };
+                        let seat = usize::from(round >= half);
                         let pair = if seat == 0 {
-                            [&contexts[candidate], baseline_context]
+                            [&contexts[candidate], opponent]
                         } else {
-                            [baseline_context, &contexts[candidate]]
+                            [opponent, &contexts[candidate]]
                         };
 
                         let outcome = play(game, pair, plan.seed.wrapping_add(round as u64));
@@ -219,7 +297,7 @@ where
 
         handles
             .into_iter()
-            .fold(vec![0.0f64; candidates.len()], |mut total, handle| {
+            .fold(vec![0.0f64; contexts.len()], |mut total, handle| {
                 for (slot, value) in total
                     .iter_mut()
                     .zip(handle.join().expect("worker panicked"))
@@ -233,4 +311,72 @@ where
     sums.into_iter()
         .map(|sum| sum / plan.games as f64)
         .collect()
+}
+
+/// Every candidate against every other, each pairing scoring both sides.
+fn against_each_other<M: Match>(
+    game: &M,
+    contexts: &[<M::Game as Game>::Context],
+    plan: &Evaluation,
+) -> Vec<f64>
+where
+    <M::Game as Game>::Context: Sync,
+{
+    let pairs: Vec<(usize, usize)> = (0..contexts.len())
+        .flat_map(|left| ((left + 1)..contexts.len()).map(move |right| (left, right)))
+        .collect();
+
+    let half = plan.games / 2;
+    let total = pairs.len() * plan.games;
+    let next = AtomicUsize::new(0);
+    let (next, contexts, pairs) = (&next, &contexts, &pairs);
+
+    let sums = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..plan.threads.max(1))
+            .map(|_| {
+                scope.spawn(move || {
+                    let mut local = vec![0.0f64; contexts.len()];
+                    loop {
+                        let job = next.fetch_add(1, Ordering::Relaxed);
+                        if job >= total {
+                            return local;
+                        }
+                        let (left, right) = pairs[job / plan.games];
+                        let round = job % plan.games;
+
+                        // Which of the two sits first flips at the halfway
+                        // point, exactly as it does against a baseline.
+                        let seat = usize::from(round >= half);
+                        let pair = if seat == 0 {
+                            [&contexts[left], &contexts[right]]
+                        } else {
+                            [&contexts[right], &contexts[left]]
+                        };
+
+                        let outcome = play(game, pair, plan.seed.wrapping_add(round as u64));
+                        // One game, two scores: this is why a round robin
+                        // measures each candidate on twice the games a baseline
+                        // does for the same cost.
+                        local[left] += outcome.rewards.reward(seat as u8);
+                        local[right] += outcome.rewards.reward(1 - seat as u8);
+                    }
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .fold(vec![0.0f64; contexts.len()], |mut total, handle| {
+                for (slot, value) in total
+                    .iter_mut()
+                    .zip(handle.join().expect("worker panicked"))
+                {
+                    *slot += value;
+                }
+                total
+            })
+    });
+
+    let played = (contexts.len() - 1) * plan.games;
+    sums.into_iter().map(|sum| sum / played as f64).collect()
 }

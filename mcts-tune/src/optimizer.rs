@@ -21,11 +21,17 @@ pub trait Optimizer {
     /// order, alongside the repaired genes that were actually played.
     fn tell(&mut self, candidates: &[Vec<f64>], fitness: &[f64]);
 
-    /// The best genes seen so far and the fitness measured for them.
+    /// The highest-scoring genes this optimizer has been told about, and their
+    /// fitness.
     ///
     /// Measured, not true: with a few hundred games per candidate this is a
     /// noisy maximum and so is biased upward. Re-measure the winner of a run
     /// before believing its number.
+    ///
+    /// A historical maximum only means something when fitness is on one scale
+    /// for the whole run, which is [`crate::Opponents::Baseline`] and not
+    /// [`crate::Opponents::RoundRobin`]. [`crate::run`] accounts for that; this
+    /// is the raw figure.
     fn best(&self) -> (&[f64], f64);
 
     /// How many candidates a generation holds, for reporting a run's cost

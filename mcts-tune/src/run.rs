@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use mcts::Game;
 use serde::{Deserialize, Serialize};
 
-use crate::arena::{evaluate, Evaluation, Match};
+use crate::arena::{evaluate, Evaluation, Match, Opponents};
 use crate::optimizer::Optimizer;
 use crate::resume::{exact, ResumeError};
 use crate::tunable::Tunable;
@@ -122,6 +122,10 @@ where
     let baseline = game.base().to_genes();
     let mut games = 0;
     let mut first = 0;
+    // Tracked here rather than taken from `Optimizer::best`, because what
+    // counts as the run's answer depends on what fitness means. See the match
+    // below.
+    let mut answer: Option<(Vec<f64>, f64)> = None;
 
     if let Some(checkpoint) = resume {
         if checkpoint.baseline != baseline {
@@ -133,6 +137,7 @@ where
         optimizer.restore(&checkpoint.optimizer)?;
         first = checkpoint.generations_done;
         games = checkpoint.games;
+        answer = Some((checkpoint.best_genes.clone(), checkpoint.best_fitness));
     }
 
     for generation in first..config.generations {
@@ -164,10 +169,19 @@ where
                 config.evaluation.seed
             },
             threads: config.evaluation.threads,
+            opponents: config.evaluation.opponents,
         };
 
         let fitness = evaluate(game, &candidates, &baseline, &plan);
-        games += candidates.len() * plan.games;
+        games += match plan.opponents {
+            Opponents::Baseline => candidates.len() * plan.games,
+            // Every unordered pair plays, so the count is the pairings and not
+            // the candidates. Reporting the baseline figure here would have a
+            // round robin claim less than a third of the games it actually
+            // plays at eleven candidates, and the cost of a run is sized from
+            // this number.
+            Opponents::RoundRobin => candidates.len() * (candidates.len() - 1) / 2 * plan.games,
+        };
         optimizer.tell(&candidates, &fitness);
 
         let elapsed = started.elapsed();
@@ -177,7 +191,26 @@ where
         );
         let worst = fitness.iter().copied().fold(f64::INFINITY, f64::min);
         let mean = fitness.iter().sum::<f64>() / fitness.len().max(1) as f64;
-        let (incumbent_genes, incumbent_fitness) = optimizer.best();
+        match config.evaluation.opponents {
+            // Every generation faced the same opponent, so the scores are on one
+            // scale and the highest of them is the run's answer.
+            Opponents::Baseline => {
+                if answer.as_ref().is_none_or(|(_, best)| top_fitness > *best) {
+                    answer = Some((candidates[top].clone(), top_fitness));
+                }
+            }
+            // The field moved, so an early generation's 0.7 was won against
+            // weaker opposition than a late generation's 0.6 and the two cannot
+            // be ranked against each other. Keeping the historical maximum would
+            // hand back whichever candidate met the feeblest field, which for a
+            // run that improved is close to the worst one. The latest generation
+            // is the only answer the numbers support.
+            Opponents::RoundRobin => answer = Some((candidates[top].clone(), top_fitness)),
+        }
+        let (incumbent_genes, incumbent_fitness) = answer
+            .as_ref()
+            .map(|(genes, fitness)| (genes.as_slice(), *fitness))
+            .expect("a generation always sets the answer");
         let checkpoint = Checkpoint {
             strategy: optimizer.name().to_string(),
             optimizer: optimizer.snapshot(),
@@ -202,9 +235,13 @@ where
         });
     }
 
-    let (best_genes, best_fitness) = optimizer.best();
+    let (best_genes, best_fitness) = answer.unwrap_or_else(|| {
+        // Zero generations were asked for, so the parameters the run started
+        // from are the only answer there is.
+        (baseline.clone(), f64::NEG_INFINITY)
+    });
     Ok(TuneReport {
-        best_genes: best_genes.to_vec(),
+        best_genes,
         best_fitness,
         generations: config.generations,
         games,

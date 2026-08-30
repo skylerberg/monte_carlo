@@ -12,8 +12,8 @@ use std::hash::Hash;
 use mcts::rand_core::Rng;
 use mcts::{Config, Game, Status};
 use mcts_tune::{
-    evaluate, play, Checkpoint, CmaEs, CmaParams, Evaluation, Ga, GaParams, Match, Optimizer,
-    ResumeError, Tunable, TuneConfig,
+    evaluate, play, Checkpoint, CmaEs, CmaParams, Evaluation, Ga, GaParams, Match, Opponents,
+    Optimizer, ResumeError, Tunable, TuneConfig,
 };
 
 const ITEMS: usize = 8;
@@ -241,6 +241,7 @@ fn identical_parameters_score_exactly_even() {
             games: 8,
             seed: 99,
             threads: 2,
+            opponents: Opponents::Baseline,
         },
     );
     assert_eq!(scores.len(), 1);
@@ -262,6 +263,7 @@ fn better_beliefs_beat_worse_ones() {
             games: 16,
             seed: 7,
             threads: 4,
+            opponents: Opponents::Baseline,
         },
     );
     assert!(
@@ -285,6 +287,7 @@ fn evaluation_is_independent_of_thread_count() {
         games: 8,
         seed: 3,
         threads,
+        opponents: Opponents::Baseline,
     };
     let one = evaluate(&table, &candidates, &baseline, &plan(1));
     let many = evaluate(&table, &candidates, &baseline, &plan(8));
@@ -478,6 +481,7 @@ fn a_full_run_reports_every_generation() {
                 games: 4,
                 seed: 5,
                 threads: 4,
+                opponents: Opponents::Baseline,
             },
             reseed_each_generation: true,
         },
@@ -505,6 +509,7 @@ fn resume_config(generations: usize) -> TuneConfig {
             games: 4,
             seed: 5,
             threads: 2,
+            opponents: Opponents::Baseline,
         },
         reseed_each_generation: true,
     }
@@ -721,4 +726,201 @@ fn a_checkpoint_for_a_different_population_is_refused() {
         wider.restore(&snapshot),
         Err(ResumeError::Malformed(_))
     ));
+}
+
+// ── Round robin ──
+
+/// Scores are zero sum inside the field, so whatever the candidates are, the
+/// population average is one half. That is the property that makes the mode
+/// ceiling-free — a population cannot run away from an opponent that is itself
+/// — and the same property that stops the fitness column being read as progress.
+#[test]
+fn round_robin_scores_average_to_a_half() {
+    let table = arena(inverted());
+    let candidates = vec![
+        truthful().to_genes(),
+        inverted().to_genes(),
+        Beliefs {
+            kind_zero: 2.0,
+            kind_one: 2.0,
+        }
+        .to_genes(),
+        Beliefs {
+            kind_zero: 5.0,
+            kind_one: 0.5,
+        }
+        .to_genes(),
+    ];
+    let scores = evaluate(
+        &table,
+        &candidates,
+        &inverted().to_genes(),
+        &Evaluation {
+            games: 4,
+            seed: 11,
+            threads: 3,
+            opponents: Opponents::RoundRobin,
+        },
+    );
+    assert_eq!(scores.len(), candidates.len());
+    let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+    assert!(
+        (mean - 0.5).abs() < 1e-12,
+        "the field averaged {mean}, not one half: {scores:?}"
+    );
+}
+
+/// The ranking still has to mean something: truthful beliefs draft better, so
+/// they should come out above inverted ones without a baseline anywhere.
+#[test]
+fn round_robin_ranks_the_better_candidate_higher() {
+    let table = arena(inverted());
+    let candidates = vec![
+        inverted().to_genes(),
+        truthful().to_genes(),
+        Beliefs {
+            kind_zero: 1.0,
+            kind_one: 1.0,
+        }
+        .to_genes(),
+    ];
+    let scores = evaluate(
+        &table,
+        &candidates,
+        &inverted().to_genes(),
+        &Evaluation {
+            games: 6,
+            seed: 4,
+            threads: 2,
+            opponents: Opponents::RoundRobin,
+        },
+    );
+    assert!(
+        scores[1] > scores[0],
+        "truthful {} did not beat inverted {}",
+        scores[1],
+        scores[0]
+    );
+}
+
+/// Identical candidates cannot be told apart, and the seat swap is what
+/// guarantees it: without it whichever sat first would collect the first-move
+/// advantage and the optimizer would chase a difference that is not there.
+#[test]
+fn identical_candidates_tie_in_a_round_robin() {
+    let table = arena(inverted());
+    let twins = vec![truthful().to_genes(), truthful().to_genes()];
+    let scores = evaluate(
+        &table,
+        &twins,
+        &inverted().to_genes(),
+        &Evaluation {
+            games: 8,
+            seed: 21,
+            threads: 2,
+            opponents: Opponents::RoundRobin,
+        },
+    );
+    assert_eq!(scores[0], 0.5);
+    assert_eq!(scores[1], 0.5);
+}
+
+#[test]
+fn round_robin_is_independent_of_thread_count() {
+    let table = arena(inverted());
+    let candidates = vec![
+        truthful().to_genes(),
+        inverted().to_genes(),
+        Beliefs {
+            kind_zero: 3.0,
+            kind_one: 3.0,
+        }
+        .to_genes(),
+    ];
+    let plan = |threads| Evaluation {
+        games: 4,
+        seed: 6,
+        threads,
+        opponents: Opponents::RoundRobin,
+    };
+    let one = evaluate(&table, &candidates, &inverted().to_genes(), &plan(1));
+    let many = evaluate(&table, &candidates, &inverted().to_genes(), &plan(8));
+    assert_eq!(one, many);
+}
+
+/// With a moving field the historical maximum is not the answer: an early
+/// generation's score was won against weaker opposition, so keeping it would
+/// hand back a candidate from before the run improved. `run` has to report the
+/// latest generation instead.
+#[test]
+fn a_round_robin_run_reports_its_latest_generation() {
+    let table = arena(inverted());
+    let mut optimizer = CmaEs::new(
+        &inverted(),
+        CmaParams {
+            population: 4,
+            seed: 3,
+            ..CmaParams::default()
+        },
+    );
+    let mut last = Vec::new();
+    let report = mcts_tune::run(
+        &table,
+        &mut optimizer,
+        &TuneConfig {
+            generations: 4,
+            evaluation: Evaluation {
+                games: 4,
+                seed: 8,
+                threads: 2,
+                opponents: Opponents::RoundRobin,
+            },
+            reseed_each_generation: false,
+        },
+        None,
+        |generation| last = generation.best_genes.to_vec(),
+    )
+    .expect("a fresh run cannot fail to resume");
+
+    assert_eq!(
+        report.best_genes, last,
+        "the run reported something other than its final generation's best"
+    );
+}
+
+/// The reported game count has to be the games actually played. `games` is per
+/// pairing, and there are `n choose 2` pairings, so using the baseline formula
+/// would under-report a round robin by more than threefold at eleven
+/// candidates — and the cost of a run is sized from this number.
+#[test]
+fn a_round_robin_generation_costs_what_it_claims() {
+    let table = arena(inverted());
+    let mut optimizer = CmaEs::new(
+        &inverted(),
+        CmaParams {
+            population: 4,
+            seed: 3,
+            ..CmaParams::default()
+        },
+    );
+    let report = mcts_tune::run(
+        &table,
+        &mut optimizer,
+        &TuneConfig {
+            generations: 2,
+            evaluation: Evaluation {
+                games: 4,
+                seed: 8,
+                threads: 2,
+                opponents: Opponents::RoundRobin,
+            },
+            reseed_each_generation: false,
+        },
+        None,
+        |_| {},
+    )
+    .expect("a fresh run cannot fail to resume");
+
+    // 4 choose 2 pairings, 4 games each, over 2 generations.
+    assert_eq!(report.games, 2 * 6 * 4);
 }

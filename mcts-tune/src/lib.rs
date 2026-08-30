@@ -49,7 +49,7 @@ mod run;
 mod sampling;
 mod tunable;
 
-pub use arena::{evaluate, play, Evaluation, Match, MatchOutcome};
+pub use arena::{evaluate, play, Evaluation, Match, MatchOutcome, Opponents};
 pub use cma::{CmaEs, CmaParams};
 pub use ga::{Ga, GaParams};
 pub use optimizer::Optimizer;
