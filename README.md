@@ -181,6 +181,50 @@ in dispatch for simultaneous support.
 | `parallel` | no | `RootParallel`: independent trees per thread, merged at the root. |
 | `serde` | no | `Config` is serialisable. |
 
+## Tuning: the `mcts-tune` crate
+
+A game's leaf evaluation is a vector of hand-set weights, and the honest way to
+judge a change to them is to play the new numbers against the old and count.
+`mcts-tune/` automates that: it proposes candidate parameter vectors, measures
+each in threaded self-play against a fixed baseline, and feeds the ranking to a
+black-box optimizer. It lives beside the search crate rather than inside it —
+it needs threads and whole games, it is offline tooling that never ships, and a
+wasm consumer should not pay for it.
+
+```rust
+let mut optimizer = CmaEs::new(&base_params, CmaParams::default());
+let report = mcts_tune::run(&arena, &mut optimizer, &config, |generation| {
+    // checkpoint however you like; the crate writes no files
+});
+```
+
+Implement [`Tunable`] to map a parameter struct to a gene vector and [`Match`]
+to say how a game starts and how genes become a search context. [`Ga`] and
+[`CmaEs`] both implement [`Optimizer`]; CMA-ES is the better fit for a vector of
+correlated continuous weights, because it learns the shape of the region worth
+sampling rather than recombining coordinates independently.
+
+**Fitness is a win rate, so it is noisy, and that governs everything else.** The
+standard error over `n` games is at worst `sqrt(0.25 / n)` — 2.5 percentage
+points even at 400 games. With `sigma_f` the spread of true strength across a
+generation, what the run is really ranking correlates with the truth at
+`sigma_f / sqrt(sigma_f^2 + 0.25/n)`. When that is low the ranking is noise, the
+bottom half gets bred, and generations move away from the optimum as readily as
+towards it. Two things follow, and both are built in:
+
+- Games per candidate matters more than candidates per generation. Below about
+  200 games, a run is mostly measuring luck.
+- Variance reduction is free strength. Every candidate in a generation plays the
+  *same* seeds, and every matchup is played from both seats, so the comparison
+  carries neither each candidate's own luck nor the first-move advantage.
+
+Two failure modes worth knowing before trusting a result. Parameters that are
+symmetric in the real game but come back differentiated are the run fitting
+noise, not signal. And an evaluation of the form `tanh(weighted_sum / scale)` is
+unchanged when every weight *and* `scale` are multiplied together, so leaving
+both in the gene vector spends games wandering a direction that cannot change a
+single game — pin one before starting.
+
 ## References
 
 Most of the algorithm, and the vocabulary, comes from Browne et al.'s survey [1].

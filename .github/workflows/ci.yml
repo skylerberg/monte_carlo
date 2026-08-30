@@ -23,22 +23,23 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-features --all-targets
+        run: cargo clippy --workspace --all-features --all-targets
 
       - name: Test (all features)
-        run: cargo test --all-features
+        run: cargo test --workspace --all-features
 
       # The crate is built to run without `time` on wasm, where `Instant`
       # panics, so the default-off path is a supported configuration and not a
-      # variant of the above.
+      # variant of the above. `mcts-tune` is offline tooling that never reaches
+      # wasm, so this one stays on the search crate alone.
       - name: Test (no default features)
-        run: cargo test --no-default-features
+        run: cargo test -p mcts --no-default-features
 
       # Every `debug_assert!` compiles away here, so the release halves of the
       # degenerate-node contracts — which assert on the value a debug build
       # aborts before producing — run in this step and in no other.
       - name: Test (release)
-        run: cargo test --release --all-features
+        run: cargo test --workspace --release --all-features
 
       # The dev profile, deliberately: overflow checks and `debug_assert!` are
       # on here and nowhere else the example runs, and a debug-build panic on
@@ -46,10 +47,11 @@ jobs:
       - name: Run the example
         run: cargo run --example tic_tac_toe
 
+      # `mcts`'s own features; `-p` because `mcts-tune` does not have them.
       - name: Feature matrix
         run: |
           for f in "" time parallel serde time,parallel time,serde parallel,serde; do
             echo "::group::features=[$f]"
-            cargo check --no-default-features --features "$f"
+            cargo check -p mcts --no-default-features --features "$f"
             echo "::endgroup::"
           done

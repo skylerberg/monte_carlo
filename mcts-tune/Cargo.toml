@@ -1,0 +1,11 @@
+[package]
+name = "mcts-tune"
+version = "0.1.0"
+edition = "2021"
+description = "Offline hyperparameter tuning for games built on the mcts crate: self-play evaluation with common random numbers, behind a choice of black-box optimizer."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+mcts = { path = "..", default-features = false }
+rand_core = "0.10"
+wyrand = "0.4"
