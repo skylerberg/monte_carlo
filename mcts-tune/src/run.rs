@@ -71,7 +71,9 @@ pub fn run<M, O>(
 ) -> TuneReport
 where
     M: Match,
-    O: Optimizer,
+    // `?Sized` so a caller that picks its strategy at runtime can pass a
+    // `&mut dyn Optimizer` rather than duplicating this call per strategy.
+    O: Optimizer + ?Sized,
     <M::Game as Game>::Context: Sync,
 {
     let baseline = game.base().to_genes();
