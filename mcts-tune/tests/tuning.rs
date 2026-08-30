@@ -12,8 +12,8 @@ use std::hash::Hash;
 use mcts::rand_core::Rng;
 use mcts::{Config, Game, Status};
 use mcts_tune::{
-    evaluate, play, CmaEs, CmaParams, Evaluation, Ga, GaParams, Match, Optimizer, Tunable,
-    TuneConfig,
+    evaluate, play, Checkpoint, CmaEs, CmaParams, Evaluation, Ga, GaParams, Match, Optimizer,
+    ResumeError, Tunable, TuneConfig,
 };
 
 const ITEMS: usize = 8;
@@ -481,8 +481,10 @@ fn a_full_run_reports_every_generation() {
             },
             reseed_each_generation: true,
         },
+        None,
         |generation| seen.push((generation.generation, generation.best_fitness)),
-    );
+    )
+    .expect("a fresh run cannot fail to resume");
 
     assert_eq!(seen.len(), 3);
     assert_eq!(
@@ -492,4 +494,231 @@ fn a_full_run_reports_every_generation() {
     assert_eq!(report.generations, 3);
     assert_eq!(report.games, 3 * 4 * 4);
     assert_eq!(report.best_genes.len(), Beliefs::gene_names().len());
+}
+
+// ── Resume ──
+
+fn resume_config(generations: usize) -> TuneConfig {
+    TuneConfig {
+        generations,
+        evaluation: Evaluation {
+            games: 4,
+            seed: 5,
+            threads: 2,
+        },
+        reseed_each_generation: true,
+    }
+}
+
+/// A checkpoint as a caller actually keeps one: written to text and parsed
+/// back.
+///
+/// Every resume test goes through this rather than passing the in-memory value
+/// straight back. Handing the `Checkpoint` object over directly tests a code
+/// path nobody uses, and it hides the whole class of bug where the state
+/// survives in memory and not on disk — which is exactly what
+/// `serde_json`'s float parser does to a run that stores its numbers as JSON
+/// numbers.
+fn through_a_file(checkpoint: &Checkpoint) -> Checkpoint {
+    let text = serde_json::to_string(checkpoint).expect("a checkpoint serializes");
+    serde_json::from_str(&text).expect("a checkpoint parses")
+}
+
+fn resume_params() -> CmaParams {
+    CmaParams {
+        population: 4,
+        seed: 21,
+        ..CmaParams::default()
+    }
+}
+
+/// The test the whole feature exists for. Stopping after three generations and
+/// resuming into a *fresh* optimizer has to produce the run that was never
+/// interrupted — not merely a similar one. Anything less means the covariance,
+/// the step size or the generator was rebuilt rather than restored, and the
+/// generations after a resume would be exploring differently from the ones
+/// before it while the log gave no sign.
+#[test]
+fn a_resumed_run_continues_exactly_where_it_stopped() {
+    let table = arena(inverted());
+
+    let mut uninterrupted = CmaEs::new(&inverted(), resume_params());
+    let mut straight = Vec::new();
+    let whole = mcts_tune::run(
+        &table,
+        &mut uninterrupted,
+        &resume_config(6),
+        None,
+        |generation| straight.push((generation.generation, generation.best_fitness)),
+    )
+    .expect("a fresh run cannot fail to resume");
+
+    let mut before = CmaEs::new(&inverted(), resume_params());
+    let mut split = Vec::new();
+    let mut saved: Option<Checkpoint> = None;
+    mcts_tune::run(&table, &mut before, &resume_config(3), None, |generation| {
+        split.push((generation.generation, generation.best_fitness));
+        saved = Some(through_a_file(&generation.checkpoint));
+    })
+    .expect("a fresh run cannot fail to resume");
+
+    let mut after = CmaEs::new(&inverted(), resume_params());
+    let resumed = mcts_tune::run(
+        &table,
+        &mut after,
+        &resume_config(6),
+        saved.as_ref(),
+        |generation| split.push((generation.generation, generation.best_fitness)),
+    )
+    .expect("the checkpoint matches this run");
+
+    assert_eq!(
+        straight, split,
+        "a resumed run diverged from an uninterrupted one"
+    );
+    assert_eq!(resumed.best_genes, whole.best_genes);
+    assert_eq!(resumed.best_fitness, whole.best_fitness);
+    assert_eq!(
+        resumed.games, whole.games,
+        "games were double-counted or lost"
+    );
+}
+
+#[test]
+fn a_checkpoint_carries_the_optimizer_state_not_just_the_answer() {
+    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let candidates = optimizer.ask();
+    let fitness: Vec<f64> = (0..candidates.len()).map(|i| i as f64).collect();
+    optimizer.tell(&candidates, &fitness);
+
+    let snapshot = optimizer.snapshot();
+    let expected = optimizer.ask();
+
+    // A fresh optimizer proposes something else entirely until it is restored.
+    let mut restored = CmaEs::new(&inverted(), resume_params());
+    assert_ne!(restored.ask(), expected);
+    restored
+        .restore(&snapshot)
+        .expect("same strategy, same dimension");
+    assert_eq!(restored.ask(), expected);
+}
+
+#[test]
+fn a_checkpoint_from_another_strategy_is_refused() {
+    let mut ga = Ga::new(&inverted(), GaParams::default());
+    let mut cma = CmaEs::new(&inverted(), resume_params());
+    assert_eq!(
+        cma.restore(&ga.snapshot()),
+        Err(ResumeError::Strategy {
+            expected: "cma-es",
+            found: String::from("ga"),
+        })
+    );
+    // And the other way, so neither direction silently starts over.
+    assert!(matches!(
+        ga.restore(&cma.snapshot()),
+        Err(ResumeError::Strategy { .. })
+    ));
+}
+
+/// Resuming against a different baseline is the trap this guard exists for: the
+/// run would carry on producing win rates that are no longer comparable to the
+/// ones before the interruption, and nothing in the log would say so.
+#[test]
+fn a_checkpoint_measured_against_another_baseline_is_refused() {
+    let table = arena(inverted());
+    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let mut saved: Option<Checkpoint> = None;
+    mcts_tune::run(
+        &table,
+        &mut optimizer,
+        &resume_config(1),
+        None,
+        |generation| {
+            saved = Some(generation.checkpoint.clone());
+        },
+    )
+    .expect("a fresh run cannot fail to resume");
+
+    // Same strategy and dimension, different seed parameters.
+    let elsewhere = arena(truthful());
+    let mut fresh = CmaEs::new(&truthful(), resume_params());
+    let outcome = mcts_tune::run(
+        &elsewhere,
+        &mut fresh,
+        &resume_config(2),
+        saved.as_ref(),
+        |_| {},
+    );
+    assert!(
+        matches!(outcome, Err(ResumeError::Baseline { .. })),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn a_malformed_checkpoint_is_refused() {
+    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let outcome = optimizer.restore(&serde_json::json!({ "strategy": "cma-es" }));
+    assert!(
+        matches!(outcome, Err(ResumeError::Malformed(_))),
+        "{outcome:?}"
+    );
+}
+
+/// A checkpoint taken before anything has been measured holds a best fitness of
+/// negative infinity, which JSON cannot carry as a number.
+#[test]
+fn an_unmeasured_optimizer_still_round_trips() {
+    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let snapshot = optimizer.snapshot();
+    let text = serde_json::to_string(&snapshot).expect("serializes");
+    let read: serde_json::Value = serde_json::from_str(&text).expect("parses");
+    optimizer.restore(&read).expect("restores");
+    assert_eq!(optimizer.best().1, f64::NEG_INFINITY);
+}
+
+/// The bug this guards against is not hypothetical: `serde_json` writes an
+/// `f64` correctly and reads it back up to one unit in the last place away. A
+/// checkpoint holding its numbers as JSON numbers therefore restores *nearly*
+/// the state it saved, and a search that compounds its state every generation
+/// turns "nearly" into a different run.
+#[test]
+fn checkpointed_floats_survive_text_exactly() {
+    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let candidates = optimizer.ask();
+    let fitness: Vec<f64> = (0..candidates.len()).map(|i| i as f64 * 0.37).collect();
+    optimizer.tell(&candidates, &fitness);
+
+    let text = serde_json::to_string(&optimizer.snapshot()).expect("serializes");
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("parses");
+    assert_eq!(
+        parsed,
+        optimizer.snapshot(),
+        "the snapshot changed on its way through text"
+    );
+
+    // And the values a plain JSON number would have damaged are the ones that
+    // decide the next candidate.
+    let mut restored = CmaEs::new(&inverted(), resume_params());
+    restored.restore(&parsed).expect("restores");
+    assert_eq!(restored.snapshot(), optimizer.snapshot());
+}
+
+#[test]
+fn a_checkpoint_for_a_different_population_is_refused() {
+    let optimizer = CmaEs::new(&inverted(), resume_params());
+    let snapshot = optimizer.snapshot();
+
+    let mut wider = CmaEs::new(
+        &inverted(),
+        CmaParams {
+            population: 8,
+            ..resume_params()
+        },
+    );
+    assert!(matches!(
+        wider.restore(&snapshot),
+        Err(ResumeError::Malformed(_))
+    ));
 }

@@ -310,6 +310,8 @@ version = "0.1.0"
 dependencies = [
  "mcts",
  "rand_core",
+ "serde",
+ "serde_json",
  "wyrand",
 ]
 
@@ -678,6 +680,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5484c3d24f0e2e117d30bce6f8792e193be33e2b6e0b3f8945ccf265c56c6da"
 dependencies = [
  "rand_core",
+ "serde",
 ]
 
 [[package]]

@@ -8,4 +8,13 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 mcts = { path = "..", default-features = false }
 rand_core = "0.10"
-wyrand = "0.4"
+# `serde1` puts the generator's own state in a checkpoint, which is what makes a
+# resumed run identical to the run it continues rather than merely similar.
+wyrand = { version = "0.4", features = ["serde1"] }
+# Not optional. This crate is offline tooling that never reaches wasm, and a
+# tuning run long enough to be worth checkpointing is the only kind anyone runs.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"

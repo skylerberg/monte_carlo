@@ -2,6 +2,7 @@ use mcts::rand_core::SeedableRng;
 use wyrand::WyRand;
 
 use crate::optimizer::Optimizer;
+use crate::resume::{exact, ResumeError, Snapshot};
 use crate::sampling::{index, standard_normal, uniform};
 use crate::tunable::Tunable;
 
@@ -57,6 +58,19 @@ pub struct Ga {
     population: Vec<Vec<f64>>,
     rng: WyRand,
     best_genes: Vec<f64>,
+    best_fitness: f64,
+}
+
+/// What a checkpoint carries. The knobs and the per-gene scales come back from
+/// the constructor, so only what the run has bred travels through the file.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GaState {
+    #[serde(with = "exact::matrix")]
+    population: Vec<Vec<f64>>,
+    rng: WyRand,
+    #[serde(with = "exact::vector")]
+    best_genes: Vec<f64>,
+    #[serde(with = "exact::scalar")]
     best_fitness: f64,
 }
 
@@ -193,5 +207,44 @@ impl Optimizer for Ga {
 
     fn name(&self) -> &'static str {
         "ga"
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        let state = GaState {
+            population: self.population.clone(),
+            rng: self.rng.clone(),
+            best_genes: self.best_genes.clone(),
+            best_fitness: self.best_fitness,
+        };
+        serde_json::to_value(Snapshot::new(self.name(), self.scales.len(), &state))
+            .expect("a snapshot serializes")
+    }
+
+    fn restore(&mut self, snapshot: &serde_json::Value) -> Result<(), ResumeError> {
+        let state: GaState = Snapshot::open(snapshot, self.name(), self.scales.len())?;
+        if state.population.len() != self.params.population {
+            return Err(ResumeError::Malformed(format!(
+                "the checkpoint holds a population of {} and this run is set to {}",
+                state.population.len(),
+                self.params.population
+            )));
+        }
+        if let Some(row) = state
+            .population
+            .iter()
+            .find(|row| row.len() != self.scales.len())
+        {
+            return Err(ResumeError::Malformed(format!(
+                "the checkpoint holds a candidate of {} genes where {} are expected",
+                row.len(),
+                self.scales.len()
+            )));
+        }
+
+        self.population = state.population;
+        self.rng = state.rng;
+        self.best_genes = state.best_genes;
+        self.best_fitness = state.best_fitness;
+        Ok(())
     }
 }

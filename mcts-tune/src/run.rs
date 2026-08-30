@@ -1,10 +1,40 @@
 use std::time::{Duration, Instant};
 
 use mcts::Game;
+use serde::{Deserialize, Serialize};
 
 use crate::arena::{evaluate, Evaluation, Match};
 use crate::optimizer::Optimizer;
+use crate::resume::{exact, ResumeError};
 use crate::tunable::Tunable;
+
+/// Everything needed to continue a run that was interrupted.
+///
+/// [`GenerationReport`] carries one of these after every generation, so a
+/// caller that persists it loses at most one generation to a kill. The crate
+/// still writes no files: where it goes, and whether it is written atomically,
+/// is the caller's decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// The strategy that wrote it, so a mismatched resume is refused rather
+    /// than quietly starting over.
+    pub strategy: String,
+    /// The optimizer's own state — for CMA-ES the adapted covariance and step
+    /// size, which is what an interruption would otherwise cost.
+    pub optimizer: serde_json::Value,
+    /// Generations already finished. A resumed run starts here.
+    pub generations_done: usize,
+    pub games: usize,
+    /// The genes every candidate was measured against.
+    ///
+    /// Checked on resume, because fitness only means anything relative to this.
+    #[serde(with = "exact::vector")]
+    pub baseline: Vec<f64>,
+    #[serde(with = "exact::vector")]
+    pub best_genes: Vec<f64>,
+    #[serde(with = "exact::scalar")]
+    pub best_fitness: f64,
+}
 
 /// One tuning run's settings.
 pub struct TuneConfig {
@@ -42,9 +72,13 @@ pub struct GenerationReport<'a> {
     pub incumbent_fitness: f64,
     pub games: usize,
     pub elapsed: Duration,
+    /// The run's state as of this generation. Persist it to make the run
+    /// resumable; ignore it and an interruption costs everything.
+    pub checkpoint: Checkpoint,
 }
 
 /// A finished run.
+#[derive(Debug, Clone)]
 pub struct TuneReport {
     pub best_genes: Vec<f64>,
     pub best_fitness: f64,
@@ -60,15 +94,24 @@ pub struct TuneReport {
 /// neither the numbers in the reports nor the noise analysis they rest on would
 /// be comparable across a run.
 ///
-/// `on_generation` is where checkpointing goes: this crate deliberately writes
-/// no files and knows nothing about serialization, so the caller decides what a
-/// generation's output looks like and where it lands.
+/// `on_generation` is where output goes: this crate deliberately writes no
+/// files, so the caller decides what a generation's output looks like and where
+/// it lands. That includes [`GenerationReport::checkpoint`], which is what
+/// makes the run resumable.
+///
+/// Pass `resume` to continue an interrupted run. The checkpoint's baseline must
+/// match this run's, and the error explains why when it does not: fitness is a
+/// win rate *against the baseline*, so resuming against a different one would
+/// keep producing numbers that are no longer comparable to the ones before the
+/// interruption. The commonest way to get that wrong is resuming with the
+/// previous run's output as the seed parameters.
 pub fn run<M, O>(
     game: &M,
     optimizer: &mut O,
     config: &TuneConfig,
+    resume: Option<&Checkpoint>,
     mut on_generation: impl FnMut(&GenerationReport),
-) -> TuneReport
+) -> Result<TuneReport, ResumeError>
 where
     M: Match,
     // `?Sized` so a caller that picks its strategy at runtime can pass a
@@ -78,8 +121,21 @@ where
 {
     let baseline = game.base().to_genes();
     let mut games = 0;
+    let mut first = 0;
 
-    for generation in 0..config.generations {
+    if let Some(checkpoint) = resume {
+        if checkpoint.baseline != baseline {
+            return Err(ResumeError::Baseline {
+                expected: baseline.len(),
+                found: checkpoint.baseline.len(),
+            });
+        }
+        optimizer.restore(&checkpoint.optimizer)?;
+        first = checkpoint.generations_done;
+        games = checkpoint.games;
+    }
+
+    for generation in first..config.generations {
         let started = Instant::now();
 
         let mut candidates = optimizer.ask();
@@ -122,6 +178,15 @@ where
         let worst = fitness.iter().copied().fold(f64::INFINITY, f64::min);
         let mean = fitness.iter().sum::<f64>() / fitness.len().max(1) as f64;
         let (incumbent_genes, incumbent_fitness) = optimizer.best();
+        let checkpoint = Checkpoint {
+            strategy: optimizer.name().to_string(),
+            optimizer: optimizer.snapshot(),
+            generations_done: generation + 1,
+            games,
+            baseline: baseline.clone(),
+            best_genes: incumbent_genes.to_vec(),
+            best_fitness: incumbent_fitness,
+        };
 
         on_generation(&GenerationReport {
             generation,
@@ -133,14 +198,15 @@ where
             incumbent_fitness,
             games,
             elapsed,
+            checkpoint,
         });
     }
 
     let (best_genes, best_fitness) = optimizer.best();
-    TuneReport {
+    Ok(TuneReport {
         best_genes: best_genes.to_vec(),
         best_fitness,
         generations: config.generations,
         games,
-    }
+    })
 }
