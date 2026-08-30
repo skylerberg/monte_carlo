@@ -707,7 +707,7 @@ fn checkpointed_floats_survive_text_exactly() {
 
 #[test]
 fn a_checkpoint_for_a_different_population_is_refused() {
-    let mut optimizer = CmaEs::new(&inverted(), resume_params());
+    let optimizer = CmaEs::new(&inverted(), resume_params());
     let snapshot = optimizer.snapshot();
 
     let mut wider = CmaEs::new(
