@@ -1,3 +1,9 @@
+# `mcts` is the workspace root as well as a member: the search crate stays at
+# the repository root so the git dependencies that pin it by rev keep
+# resolving, while `mcts-tune` builds alongside it.
+[workspace]
+members = ["mcts-tune"]
+
 [package]
 name = "mcts"
 version = "0.4.0"
