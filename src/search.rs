@@ -14,9 +14,9 @@ use crate::game::{Game, JointChoices, PlayerSet, Rewards, SimultaneousPolicy, St
 use crate::node::{JointKey, Node};
 use crate::rank::{leader_of, Candidate};
 use crate::select::select;
-use crate::util::below;
 #[cfg(debug_assertions)]
 use crate::util::hash_of;
+use crate::util::{below, clamp_reward};
 
 /// How often the wall clock is consulted, in iterations.
 const DEADLINE_CHECK_MASK: u32 = 31;
@@ -94,23 +94,36 @@ pub struct Config {
     /// chosen move.
     ///
     /// The answer is the best mean reward among the candidates the search
-    /// selected enough times to trust, and a mean moves with the *rewards*, so
-    /// almost nothing about it can be proved from the counts in hand — the
-    /// rewards this crate accumulates are whatever the game returned, not
-    /// values clamped into [`Config::min_reward`]`..=`[`Config::max_reward`].
-    /// What is still proved is a claim about evidence: every rival is so far
+    /// selected enough times to trust. Two things are proved about it, and a
+    /// rival has to escape both. One is a claim about evidence: a rival so far
     /// from being sampled enough to be trusted that the iterations left cannot
-    /// get it there. That is a narrow case. Where two candidates are both well
-    /// sampled the search now spends its whole budget and reports
-    /// [`StopReason::Budget`]; turning this on costs a branch per iteration and
-    /// buys nothing there. A branch and not a scan: while more iterations are
-    /// left than the evidence bar is high, no rival can be out of reach and the
-    /// pass over the root's candidates is skipped without being made. Only
-    /// applies when `iterations` is non-zero, and a search that spends its whole
-    /// budget reports [`StopReason::Budget`] rather than
-    /// [`StopReason::Proven`]. It is switched off in practice by an
-    /// `iterations: u32::MAX` run-until-cancelled budget, for the same reason:
-    /// the iterations left are always more than the bar is high.
+    /// get it there. The other is a claim about the mean, which holds because
+    /// every reward is clamped into
+    /// [`Config::min_reward`]`..=`[`Config::max_reward`] where it enters an
+    /// accumulator — a rival paid the ceiling on every remaining iteration
+    /// still falls short of the leader paid the floor on all of them.
+    ///
+    /// Only applies when `iterations` is non-zero, and a search that spends its
+    /// whole budget reports [`StopReason::Budget`] rather than
+    /// [`StopReason::Proven`]. An `iterations: u32::MAX` run-until-cancelled
+    /// budget switches it off in practice: nothing is out of reach of that many
+    /// iterations.
+    ///
+    /// # Measure this before turning it on with tree reuse
+    ///
+    /// The proof is about *this* move, and it is sound: stopping early returns
+    /// the move the whole budget would have. What it does not preserve is the
+    /// tree. A search that stops at 60% of its budget hands
+    /// [`Searcher::reuse_subtree`] a tree with 60% of the statistics, and the
+    /// next search starts poorer. Each move is right and the sequence of them
+    /// can still be worse.
+    ///
+    /// Measured on the colori consumer, 80 seeded games, three players, a
+    /// 1000-iteration budget and tree reuse between moves: turning this on saves
+    /// **0.46%** of iterations and costs **4%** of mean score. A game that does
+    /// not reuse its tree pays no such price, and one whose searches are long
+    /// enough for the proof to fire early gains more than either figure
+    /// suggests. Which of those you are is not something this crate can tell.
     pub early_termination: bool,
     /// Bounds of the reward scale. Set these to your game's actual range —
     /// both bounds, and neither wider than the payoffs really are.
@@ -957,14 +970,20 @@ impl<G: Game> Searcher<G> {
 
             if cfg.early_termination && target != 0 {
                 refresh_root_legal(root, state, ctx, scratch, root_players, perspective);
-                if early_stop::settled::<G>(
-                    root,
-                    root_players,
-                    perspective,
-                    target,
-                    &scratch.root_legal,
-                    scratch.root_legal_complete,
-                ) {
+                if early_stop::worth_asking(root.visits, target)
+                    && early_stop::settled::<G>(
+                        root,
+                        root_players,
+                        perspective,
+                        target,
+                        &scratch.root_legal,
+                        scratch.root_legal_complete,
+                        crate::rank::RewardRange {
+                            lo: cfg.min_reward,
+                            hi: cfg.max_reward,
+                        },
+                    )
+                {
                     break StopReason::Proven;
                 }
             }
@@ -1673,11 +1692,16 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
     };
     let mut node = &mut *root;
     backup.credit(node, 0);
-    node.record(rewards.reward(node.player));
+    // Clamped where it enters the accumulator, not where the game produced it:
+    // `Rewards` has no map, so confining the vector itself would need a trait
+    // method, and the bound is only load-bearing here. Every mean the ranking
+    // and the early-termination proof read is now inside the declared range.
+    let clamped = |player| clamp_reward(rewards.reward(player), cfg.min_reward, cfg.max_reward);
+    node.record(clamped(node.player));
     for (depth, &i) in path.iter().enumerate() {
         node = &mut node.children[i as usize];
         backup.credit(node, depth + 1);
-        node.record(rewards.reward(node.player));
+        node.record(clamped(node.player));
     }
 
     rewards

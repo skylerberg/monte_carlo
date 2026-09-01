@@ -346,6 +346,40 @@ byte-identical and node counts are bit-identical in every configuration.
   widen the band the good arms are compared inside. Declare the range your game
   actually pays in.
 
+## [Unreleased]
+
+### Changed
+
+* **The declared reward range is enforced, not merely believed.** Every reward
+  is clamped into `[Config::min_reward, Config::max_reward]` where it enters an
+  accumulator. It was a declaration before: `Node::record` added whatever the
+  game returned, and the only clamp in the crate was `normalize_reward` under
+  regret matching. Three things are measured against that range — Duct's tie
+  tolerance, regret matching's normalisation, and now the early-termination
+  proof — so a payoff outside it was not a slightly-off number but one those
+  read on a different scale. A game that pays outside its declared range now
+  loses the excess silently in release; the debug assertion that reports it is
+  unchanged. Games that pay inside their declared range are unaffected, which
+  includes both known consumers.
+* **Early termination proves a mean again.** With the range enforced, a rival
+  paid the ceiling on every remaining iteration can be shown to fall short of
+  the leader paid the floor on all of them. The counting claim it had been
+  reduced to — a rival too thinly sampled to be trusted in the iterations left —
+  is kept as the other half. Both sides are charged the full remaining budget,
+  which no single run can honour, so the bound is loose in the safe direction.
+  The proof is asked at every visit inside the last `MIN_EVIDENCE` iterations
+  and every eighth before that; a mean claim that fires seven iterations late
+  costs seven iterations.
+
+### Fixed
+
+* `Config::early_termination` documents what it costs a caller that reuses its
+  tree, which is not nothing and was not written down. The proof is about *this*
+  move and preserves it, but a search that stops at 60% of its budget hands
+  `reuse_subtree` 60% of the statistics. Measured on the colori consumer over 80
+  seeded games: turning it on saves 0.46% of iterations and costs 4% of mean
+  score. A game that does not reuse its tree pays no such price.
+
 ## [0.3.0]
 
 Simultaneous moves: a state can now report `Status::Simultaneous { players }`,

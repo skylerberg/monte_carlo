@@ -480,7 +480,7 @@ pub(crate) fn credit_marginals<C, W: Rewards>(
         }
 
         let arm = &mut simul.arm_stats[at];
-        arm.cumulative_reward += reward;
+        arm.cumulative_reward += crate::util::clamp_reward(reward, min_reward, max_reward);
         arm.visits += 1;
     }
 }
