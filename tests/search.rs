@@ -312,6 +312,23 @@ fn a_panicking_search_disarms_the_tree() {
     assert_eq!(next.root_visits, 100);
 }
 
+/// One off `fuse`, returning what it held, or `None` once it is empty: a
+/// decrement that saturates, so a burned-out fuse stays burned out for every
+/// thread that reaches it. Written out because `fetch_update` is deprecated on
+/// current stable while `try_update`, its replacement, is newer than toolchains
+/// this suite still builds on.
+fn burn(fuse: &std::sync::atomic::AtomicU32) -> Option<u32> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut left = fuse.load(Relaxed);
+    loop {
+        let next = left.checked_sub(1)?;
+        match fuse.compare_exchange_weak(left, next, Relaxed, Relaxed) {
+            Ok(_) => return Some(left),
+            Err(actual) => left = actual,
+        }
+    }
+}
+
 /// Three plies of three choices whose context is a fuse: every `status` call
 /// burns one, and the call that finds it empty panics. Local rather than
 /// shared, because a pooled search needs a `Sync` context and nothing in
@@ -330,11 +347,7 @@ impl mcts::Game for FusedFork {
     type Side = ();
 
     fn status(&self, fuse: &Self::Context) -> mcts::Status<[f64; 2]> {
-        use std::sync::atomic::Ordering::Relaxed;
-        // Saturating, so the fuse stays burned out for every worker that
-        // reaches it rather than wrapping back to a full one.
-        fuse.fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
-            .expect("the fuse burned out");
+        burn(fuse).expect("the fuse burned out");
         if self.ply >= 3 {
             mcts::Status::Terminal([0.5, 0.5])
         } else {
@@ -1784,11 +1797,7 @@ impl mcts::Game for Countdown {
     ) {
         use std::sync::atomic::Ordering::Relaxed;
         dest.clone_from(self);
-        if fuse
-            .left
-            .fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
-            .is_ok_and(|left| left == 1)
-        {
+        if burn(&fuse.left) == Some(1) {
             fuse.cancel.store(true, Relaxed);
         }
     }
