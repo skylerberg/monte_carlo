@@ -231,7 +231,7 @@ fn arm(node: &Node<u8>, player: u8, action: u8) -> Option<(u32, u32)> {
     let marginals = node.marginals(player)?;
     (0..marginals.len())
         .find(|&arm| *marginals.choice(arm) == action)
-        .map(|arm| (marginals.visits(arm), marginals.availability(arm)))
+        .map(|arm| (marginals.visits(arm), marginals.times_available(arm)))
 }
 
 /// A node promoted by `reuse_joint` carries the arms of every determinization
@@ -479,18 +479,18 @@ fn a_re_rooted_root_counts_the_opportunities_the_fast_path_skips() {
         for child in root.children() {
             let choice = child.edge().choice().expect("a sequential root's child");
             assert!(
-                child.availability() >= second.iterations_used,
+                child.times_available() >= second.iterations_used,
                 "seed {seed}: child {choice} was offered {} times by a search that ran \
                  {} iterations, every one of which offered every child",
-                child.availability(),
+                child.times_available(),
                 second.iterations_used
             );
             assert!(
-                child.visits() <= child.availability(),
+                child.visits() <= child.times_available(),
                 "seed {seed}: child {choice} holds {} selections against {} \
                  opportunities to make them",
                 child.visits(),
-                child.availability()
+                child.times_available()
             );
         }
         assert_eq!(

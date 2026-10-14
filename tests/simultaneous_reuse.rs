@@ -187,7 +187,7 @@ fn arms(node: &Node<u8>) -> Vec<Vec<(u8, u32, u32)>> {
                     (
                         *marginals.choice(arm),
                         marginals.visits(arm),
-                        marginals.availability(arm),
+                        marginals.times_available(arm),
                     )
                 })
                 .collect()
@@ -287,7 +287,7 @@ fn reuse_joint_carries_arm_statistics_forward() {
 /// still the denominator of its exploration term and the divisor that makes
 /// its strategy comparable to a more often legal arm's.
 #[test]
-fn a_reused_simultaneous_root_keeps_arm_availability() {
+fn a_reused_simultaneous_root_keeps_arm_times_available() {
     let game = TwoRounds::default();
     let mut searcher = Searcher::new(&game);
     searcher.search(&game, &(), 0, &config(4_000), None, &mut rng(17));
@@ -301,14 +301,14 @@ fn a_reused_simultaneous_root_keeps_arm_availability() {
     let visits = promoted.visits();
     let before = arms(promoted);
 
-    let &(_, _, edge_availability) = before[1]
+    let &(_, _, edge_times_available) = before[1]
         .iter()
         .find(|&&(choice, _, _)| choice == EDGE)
         .expect("player 1's variable action is what separates availability from visits");
     let always_legal = before[1][0].2;
     assert!(
-        edge_availability > 0 && edge_availability < always_legal,
-        "the variable action was legal in {edge_availability} of {visits} visits \
+        edge_times_available > 0 && edge_times_available < always_legal,
+        "the variable action was legal in {edge_times_available} of {visits} visits \
          against an always-legal arm's {always_legal}, so availability here is \
          indistinguishable from the node's own visit count"
     );
@@ -329,11 +329,11 @@ fn a_reused_simultaneous_root_keeps_arm_availability() {
     let after = arms(root);
     assert_eq!(after, before, "availability was rewritten by promotion");
     for (slot, player_arms) in after.iter().enumerate() {
-        for &(choice, _, availability) in player_arms {
+        for &(choice, _, times_available) in player_arms {
             assert!(
-                availability > 1,
+                times_available > 1,
                 "slot {slot}'s action {choice} came back with availability \
-                 {availability}, which is the node's own re-rooted value rather than \
+                 {times_available}, which is the node's own re-rooted value rather than \
                  the arm's"
             );
         }

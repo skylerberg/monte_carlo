@@ -19,7 +19,7 @@
 //! # Why the answer is not the most visited candidate
 //!
 //! A candidate is selectable at most once per iteration in which it was legal,
-//! so `visits <= availability` is a hard cap and raw visits rank by *legality
+//! so `visits <= times_available` is a hard cap and raw visits rank by *legality
 //! rate* as much as by value. A move legal in a third of the determinizations
 //! and played on nearly every iteration that offered it loses the argmax to one
 //! legal always and played on two thirds, however much better it is — and no
@@ -129,22 +129,22 @@ pub(crate) struct Candidate {
     /// produced `visits`. Numerator and denominator must describe the same
     /// window or the rate is meaningless, which is why re-rooting carries both
     /// forward or neither.
-    availability: u32,
+    times_available: u32,
     cumulative_reward: f64,
 }
 
 impl Candidate {
-    pub(crate) fn new(visits: u32, availability: u32, cumulative_reward: f64) -> Self {
+    pub(crate) fn new(visits: u32, times_available: u32, cumulative_reward: f64) -> Self {
         debug_assert!(
-            visits <= availability,
-            "mcts: a root candidate holds {visits} selections against {availability} \
+            visits <= times_available,
+            "mcts: a root candidate holds {visits} selections against {times_available} \
              opportunities to make them. A selection is only possible on an iteration \
              that offered the candidate, so the two counts have come from different \
              windows and the rate this ranking breaks its ties with is meaningless."
         );
         Self {
             visits,
-            availability,
+            times_available,
             cumulative_reward,
         }
     }
@@ -155,7 +155,7 @@ impl Candidate {
     /// the visit argmax rather than to a rate above 1 that would win every tie
     /// against an honest candidate.
     fn opportunities(&self) -> u64 {
-        self.availability.max(self.visits).max(1) as u64
+        self.times_available.max(self.visits).max(1) as u64
     }
 
     /// Selections this candidate has taken.
@@ -285,8 +285,8 @@ mod tests {
             candidates
                 .iter()
                 .enumerate()
-                .map(|(i, &(visits, availability, reward))| {
-                    (i, Candidate::new(visits, availability, reward))
+                .map(|(i, &(visits, times_available, reward))| {
+                    (i, Candidate::new(visits, times_available, reward))
                 }),
         )
         .map(|(i, _)| i)

@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offers a legal move the tree has no candidate for is never settled, because a
   candidate created with `n` iterations left can spend all of them, clear the
   bar, and be ranked on a mean nothing in hand constrains.
-* **`Node::availability` is public.** How many iterations offered a choice is
+* **`Node::times_available` is public.** How many iterations offered a choice is
   half of the rate that breaks the root ranking's ties, and it was not reachable
   from `Searcher::tree`, so a caller could neither reproduce the ranking nor tell
   whether their `determinize_into` varies the legal set at all.

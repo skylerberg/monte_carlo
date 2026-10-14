@@ -240,7 +240,7 @@ fn select_duct<C, R: Rng + ?Sized>(
         ucb_raw(
             arm.cumulative_reward,
             arm.visits as f64,
-            arm.ln_availability,
+            arm.ln_times_available,
             exploration,
             0.0,
             0.0,
@@ -494,7 +494,7 @@ pub(crate) fn credit_marginals<C, W: Rewards>(
 /// to extract here.
 ///
 /// Under [`SimultaneousPolicy::RegretMatching`] an arm's weight is its
-/// `strategy_sum` divided by its `availability`. That division is not cosmetic:
+/// `strategy_sum` divided by its `times_available`. That division is not cosmetic:
 /// `strategy_sum` only accumulates on iterations where the arm was legal, so
 /// two equally good arms legal in 90% and 20% of determinizations end up with
 /// mass in roughly a 4.5:1 ratio, and dividing turns each accumulator into a
@@ -521,7 +521,7 @@ pub(crate) fn credit_marginals<C, W: Rewards>(
 /// distribution is the object an opponent exploits, so it is not handed back
 /// dressed as a mixed strategy. `Duct` ranks by the mean reward there rather
 /// than by the raw count, for the same reason this branch divides
-/// `strategy_sum` by availability: a count is a measurement of how often the
+/// `strategy_sum` by times_available: a count is a measurement of how often the
 /// arm was legal as much as of how good it is.
 pub(crate) fn root_strategy_into<C>(
     simul: &Simul<C>,
@@ -742,7 +742,7 @@ pub(crate) fn leader_over(stats: &[ArmStats], legal: Option<&[bool]>) -> Option<
             .map(|(arm, stats)| {
                 (
                     arm,
-                    Candidate::new(stats.visits, stats.availability, stats.cumulative_reward),
+                    Candidate::new(stats.visits, stats.times_available, stats.cumulative_reward),
                 )
             }),
     )
@@ -800,7 +800,7 @@ fn weight_of(
     one_hot: Option<usize>,
 ) -> f64 {
     if mixes {
-        arm_policy[arm].strategy_sum.max(0.0) / stats[arm].availability.max(1) as f64
+        arm_policy[arm].strategy_sum.max(0.0) / stats[arm].times_available.max(1) as f64
     } else if one_hot == Some(arm) {
         1.0
     } else {
@@ -1080,8 +1080,8 @@ mod tests {
         for arm in 0..ARMS {
             let stats = &mut simul.arm_stats[arm];
             stats.visits = 100;
-            stats.availability = 100;
-            stats.ln_availability = 0.0;
+            stats.times_available = 100;
+            stats.ln_times_available = 0.0;
             // Mean rewards 0.500, 0.5045, 0.509, ... — steps of 0.9 * tol, so
             // every adjacent pair ties and the ends are nowhere near.
             stats.cumulative_reward = (0.5 + arm as f64 * 0.9 * TIE_TOLERANCE) * 100.0;
@@ -1134,15 +1134,15 @@ mod tests {
         node.expand_marginals(0, &[0u8, 1, 2], RM, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         simul.arm_policy[0].strategy_sum = 200.0;
-        simul.arm_stats[0].availability = 1_000;
+        simul.arm_stats[0].times_available = 1_000;
         simul.arm_stats[0].visits = 200;
         simul.arm_stats[0].cumulative_reward = 80.0;
         simul.arm_policy[1].strategy_sum = 190.0;
-        simul.arm_stats[1].availability = 200;
+        simul.arm_stats[1].times_available = 200;
         simul.arm_stats[1].visits = 190;
         simul.arm_stats[1].cumulative_reward = 171.0;
         simul.arm_policy[2].strategy_sum = 3.0;
-        simul.arm_stats[2].availability = 3;
+        simul.arm_stats[2].times_available = 3;
         simul.arm_stats[2].visits = 3;
         simul.arm_stats[2].cumulative_reward = 3.0;
 
@@ -1179,7 +1179,7 @@ mod tests {
             .enumerate()
         {
             simul.arm_stats[arm].visits = visits;
-            simul.arm_stats[arm].availability = visits;
+            simul.arm_stats[arm].times_available = visits;
             simul.arm_stats[arm].cumulative_reward = reward;
             assert_eq!(simul.arm_policy[arm].strategy_sum, 0.0);
         }
@@ -1231,8 +1231,8 @@ mod tests {
             {
                 let stats = &mut simul.arm_stats[arm];
                 stats.visits = visits;
-                stats.availability = 100;
-                stats.ln_availability = 100f64.ln();
+                stats.times_available = 100;
+                stats.ln_times_available = 100f64.ln();
                 stats.cumulative_reward = reward * scale;
             }
             let mut rng = WyRand::seed_from_u64(0x5CA1);
@@ -1368,7 +1368,7 @@ mod tests {
         let simul = node.simul().expect("simultaneous");
         let arm = &simul.arm_stats[2];
         assert_eq!(
-            arm.availability, legal_for_arm_two,
+            arm.times_available, legal_for_arm_two,
             "arm 2 should have been available on exactly the iterations that offered it"
         );
         assert!(arm.visits > 0, "arm 2 was never selected");
@@ -1392,8 +1392,8 @@ mod tests {
             let stats = &mut simul.arm_stats[arm];
             stats.visits = 10;
             stats.cumulative_reward = 5.0;
-            stats.availability = 10;
-            stats.ln_availability = 10f64.ln();
+            stats.times_available = 10;
+            stats.ln_times_available = 10f64.ln();
         }
 
         let draws = 100_000;
@@ -1459,19 +1459,19 @@ mod tests {
     }
 
     #[test]
-    fn root_extraction_divides_out_availability() {
+    fn root_extraction_divides_out_times_available() {
         let mut node = simul_node(PlayerSet::first_n(1));
         node.expand_marginals(0, &[0u8, 1], RM, usize::MAX);
         let simul = node.simul_mut().expect("simultaneous");
         // Equal strategy mass, but one arm was legal five times as often — so
         // the arm that was rarely legal was played on nearly every iteration
-        // that offered it. `strategy_sum` can never exceed `availability`,
+        // that offered it. `strategy_sum` can never exceed `times_available`,
         // which is what makes this a state the search can actually reach.
         for arm in 0..2 {
             simul.arm_policy[arm].strategy_sum = 20.0;
         }
-        simul.arm_stats[0].availability = 100;
-        simul.arm_stats[1].availability = 20;
+        simul.arm_stats[0].times_available = 100;
+        simul.arm_stats[1].times_available = 20;
 
         let mut strategy = Vec::new();
         root_strategy_into(simul, 0, &[true, true], RM, &mut strategy);

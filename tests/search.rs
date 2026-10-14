@@ -1653,7 +1653,7 @@ impl mcts::Game for RareTraps {
 /// different integer. Measured: three selections per trap under the availability
 /// rule and five under the parent's visit count, in every seed.
 #[test]
-fn a_rarely_legal_child_is_explored_against_its_own_availability() {
+fn a_rarely_legal_child_is_explored_against_its_own_times_available() {
     const BUDGET: u32 = 40_000;
 
     let game = RareTraps::new();
@@ -1690,13 +1690,13 @@ fn a_rarely_legal_child_is_explored_against_its_own_availability() {
         let ratio = config(BUDGET).exploration_constant / RareTraps::GOOD_PAYOFF;
         (ratio * ratio * ln_total).ceil() as u32
     };
-    let availability =
-        traps.iter().map(|trap| trap.availability()).sum::<u32>() / RareTraps::TRAPS as u32;
-    let by_availability = budget_for((availability as f64).ln());
+    let times_available =
+        traps.iter().map(|trap| trap.times_available()).sum::<u32>() / RareTraps::TRAPS as u32;
+    let by_times_available = budget_for((times_available as f64).ln());
     let by_parent_visits = budget_for((node.visits() as f64).ln());
     assert!(
-        by_availability < by_parent_visits,
-        "the two denominators predict the same {by_availability} selections a trap, so \
+        by_times_available < by_parent_visits,
+        "the two denominators predict the same {by_times_available} selections a trap, so \
          this fixture cannot tell them apart"
     );
 
@@ -1705,12 +1705,12 @@ fn a_rarely_legal_child_is_explored_against_its_own_availability() {
         spent < by_parent_visits,
         "the search spent {spent} selections on a trap legal one world in {}, which is \
          what `ln(parent visits)` = {by_parent_visits} buys rather than what the trap's \
-         own {availability} opportunities = {by_availability} do",
+         own {times_available} opportunities = {by_times_available} do",
         RareTraps::PERIOD
     );
     assert!(
-        spent <= by_availability,
-        "the search spent {spent} selections on a trap against the {by_availability} its \
+        spent <= by_times_available,
+        "the search spent {spent} selections on a trap against the {by_times_available} its \
          own availability predicts"
     );
 }

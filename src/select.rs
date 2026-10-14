@@ -54,7 +54,7 @@ pub(crate) fn select<C>(
 
     // Textbook UCB1 at the root, the ISMCTS availability rule below it. The
     // asymmetry is deliberate and is not a place to "restore" consistency:
-    // nothing maintains `ln_availability` on a root child — `Node::expand` and
+    // nothing maintains `ln_times_available` on a root child — `Node::expand` and
     // the `ROOT_CHOICES_INVARIANT` fast path both skip the `ln` there rather
     // than pay a libm call per child per iteration on the widest loop in the
     // search, and `reroot_at` resets the field on promotion — so reading it
@@ -82,7 +82,7 @@ pub(crate) fn select<C>(
         let ln_total = if is_root {
             root_ln
         } else {
-            child.ln_availability
+            child.ln_times_available
         };
         let value = ucb(child, ln_total, exploration, bias_weight);
         if value > best_value {

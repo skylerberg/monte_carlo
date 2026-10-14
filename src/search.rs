@@ -179,7 +179,7 @@ pub struct SimultaneousConfig {
     /// [`crate::SimultaneousPolicy::Duct`].
     ///
     /// Same units and same scale as [`Config::exploration_constant`] — a
-    /// multiplier on `sqrt(ln availability / visits)`, on the reward scale — and
+    /// multiplier on `sqrt(ln times_available / visits)`, on the reward scale — and
     /// a separate field only because a simultaneous node's bandits are coupled.
     /// At a sequential node the constant sets how fast the bandit concentrates
     /// and the limit does not depend on it; at a simultaneous node the cycle two
@@ -622,7 +622,7 @@ impl<G: Game> Searcher<G> {
     /// same price a [`Searcher::reuse_subtree`] miss has always cost.
     ///
     /// The promoted node keeps its own marginal statistics, availability
-    /// included. A node's `availability` counts iterations at the parent that
+    /// included. A node's `times_available` counts iterations at the parent that
     /// was just discarded, which is why re-rooting resets it; an arm's counts
     /// iterations at *this* node, which are still valid and are still the
     /// denominator of its exploration term. Zeroing them would leave a
@@ -1030,7 +1030,7 @@ fn root_answer<C>(root: &Node<C>, legal: &[bool]) -> Option<usize> {
             .map(|(i, child)| {
                 (
                     i,
-                    Candidate::new(child.visits, child.availability, child.cumulative_reward),
+                    Candidate::new(child.visits, child.times_available, child.cumulative_reward),
                 )
             }),
     )
@@ -1577,7 +1577,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
             // determinization, so this iteration is an opportunity for all of
             // them. Skipping the count here would leave availability frozen at
             // whatever the first pass wrote while visits went on accumulating,
-            // and the root ranking divides one by the other. `ln_availability`
+            // and the root ranking divides one by the other. `ln_times_available`
             // is deliberately *not* kept with it, exactly as `Node::expand`
             // leaves it at a root: `select` scores a root's children against
             // the root's own visit count, and `reroot_at` resets the field on
@@ -1585,7 +1585,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
             // iteration — the widest loop in the search — for a denominator
             // with no reader.
             for child in node.children.iter_mut() {
-                child.availability += 1;
+                child.times_available += 1;
             }
             root_avail.clear();
             root_avail.resize(node.children.len(), true);
@@ -2095,7 +2095,7 @@ mod tests {
     }
 
     /// The invariant fast path skips move generation but must not skip the
-    /// availability stamp: an arm whose `availability` stops growing keeps a
+    /// availability stamp: an arm whose `times_available` stops growing keeps a
     /// stale exploration bonus and a strategy average divided by the wrong
     /// denominator.
     #[test]
@@ -2109,7 +2109,7 @@ mod tests {
             let marginals = tree.marginals(player).expect("this player acts here");
             assert_eq!(marginals.len(), 3);
             for arm in 0..marginals.len() {
-                assert_eq!(marginals.availability(arm), result.root_visits);
+                assert_eq!(marginals.times_available(arm), result.root_visits);
             }
             let selected: u32 = (0..marginals.len()).map(|a| marginals.visits(a)).sum();
             assert_eq!(selected, result.root_visits);
@@ -2122,7 +2122,7 @@ mod tests {
     /// by it — and must not pay a libm call per child per iteration for a
     /// denominator with no reader.
     #[test]
-    fn an_invariant_root_counts_availability_without_caching_its_logarithm() {
+    fn an_invariant_root_counts_times_available_without_caching_its_logarithm() {
         /// A sequential root whose four choices are legal in every
         /// determinization, so the fast path takes over from iteration 2.
         #[derive(Clone, Default)]
@@ -2185,11 +2185,11 @@ mod tests {
         assert_eq!(root.children().len(), 4);
         for child in root.children() {
             assert_eq!(
-                child.availability, result.root_visits,
+                child.times_available, result.root_visits,
                 "every root child is legal in every determinization"
             );
             assert_eq!(
-                child.ln_availability, 0.0,
+                child.ln_times_available, 0.0,
                 "a root child's exploration denominator has no reader"
             );
         }
