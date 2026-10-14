@@ -87,7 +87,6 @@ impl<S: Strategy, C: ChoiceKind> Game for WideBandit<S, C> {
     const CHILD_INDEX_THRESHOLD: usize = S::THRESHOLD;
     // Re-enumerate the root every iteration. That is where lookup cost shows up,
     // and it is what any node below the root pays anyway.
-    const ROOT_CHOICES_INVARIANT: bool = false;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.ply >= 2 {

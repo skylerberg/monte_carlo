@@ -312,6 +312,23 @@ fn a_panicking_search_disarms_the_tree() {
     assert_eq!(next.root_visits, 100);
 }
 
+/// One off `fuse`, returning what it held, or `None` once it is empty: a
+/// decrement that saturates, so a burned-out fuse stays burned out for every
+/// thread that reaches it. Written out because `fetch_update` is deprecated on
+/// current stable while `try_update`, its replacement, is newer than toolchains
+/// this suite still builds on.
+fn burn(fuse: &std::sync::atomic::AtomicU32) -> Option<u32> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut left = fuse.load(Relaxed);
+    loop {
+        let next = left.checked_sub(1)?;
+        match fuse.compare_exchange_weak(left, next, Relaxed, Relaxed) {
+            Ok(_) => return Some(left),
+            Err(actual) => left = actual,
+        }
+    }
+}
+
 /// Three plies of three choices whose context is a fuse: every `status` call
 /// burns one, and the call that finds it empty panics. Local rather than
 /// shared, because a pooled search needs a `Sync` context and nothing in
@@ -330,11 +347,7 @@ impl mcts::Game for FusedFork {
     type Side = ();
 
     fn status(&self, fuse: &Self::Context) -> mcts::Status<[f64; 2]> {
-        use std::sync::atomic::Ordering::Relaxed;
-        // Saturating, so the fuse stays burned out for every worker that
-        // reaches it rather than wrapping back to a full one.
-        fuse.fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
-            .expect("the fuse burned out");
+        burn(fuse).expect("the fuse burned out");
         if self.ply >= 3 {
             mcts::Status::Terminal([0.5, 0.5])
         } else {
@@ -1653,7 +1666,7 @@ impl mcts::Game for RareTraps {
 /// different integer. Measured: three selections per trap under the availability
 /// rule and five under the parent's visit count, in every seed.
 #[test]
-fn a_rarely_legal_child_is_explored_against_its_own_availability() {
+fn a_rarely_legal_child_is_explored_against_its_own_times_available() {
     const BUDGET: u32 = 40_000;
 
     let game = RareTraps::new();
@@ -1690,13 +1703,13 @@ fn a_rarely_legal_child_is_explored_against_its_own_availability() {
         let ratio = config(BUDGET).exploration_constant / RareTraps::GOOD_PAYOFF;
         (ratio * ratio * ln_total).ceil() as u32
     };
-    let availability =
-        traps.iter().map(|trap| trap.availability()).sum::<u32>() / RareTraps::TRAPS as u32;
-    let by_availability = budget_for((availability as f64).ln());
+    let times_available =
+        traps.iter().map(|trap| trap.times_available()).sum::<u32>() / RareTraps::TRAPS as u32;
+    let by_times_available = budget_for((times_available as f64).ln());
     let by_parent_visits = budget_for((node.visits() as f64).ln());
     assert!(
-        by_availability < by_parent_visits,
-        "the two denominators predict the same {by_availability} selections a trap, so \
+        by_times_available < by_parent_visits,
+        "the two denominators predict the same {by_times_available} selections a trap, so \
          this fixture cannot tell them apart"
     );
 
@@ -1705,12 +1718,12 @@ fn a_rarely_legal_child_is_explored_against_its_own_availability() {
         spent < by_parent_visits,
         "the search spent {spent} selections on a trap legal one world in {}, which is \
          what `ln(parent visits)` = {by_parent_visits} buys rather than what the trap's \
-         own {availability} opportunities = {by_availability} do",
+         own {times_available} opportunities = {by_times_available} do",
         RareTraps::PERIOD
     );
     assert!(
-        spent <= by_availability,
-        "the search spent {spent} selections on a trap against the {by_availability} its \
+        spent <= by_times_available,
+        "the search spent {spent} selections on a trap against the {by_times_available} its \
          own availability predicts"
     );
 }
@@ -1784,11 +1797,7 @@ impl mcts::Game for Countdown {
     ) {
         use std::sync::atomic::Ordering::Relaxed;
         dest.clone_from(self);
-        if fuse
-            .left
-            .fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
-            .is_ok_and(|left| left == 1)
-        {
+        if burn(&fuse.left) == Some(1) {
             fuse.cancel.store(true, Relaxed);
         }
     }

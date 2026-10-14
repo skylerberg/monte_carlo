@@ -242,7 +242,7 @@ fn a_rarely_legal_but_worse_move_does_not_win_the_root() {
             let stats: Vec<(u32, u32)> = root
                 .children()
                 .iter()
-                .map(|child| (child.visits(), child.availability()))
+                .map(|child| (child.visits(), child.times_available()))
                 .collect();
             let rate = |i: usize| stats[i].0 as f64 / stats[i].1.max(1) as f64;
             assert!(
@@ -569,9 +569,9 @@ fn a_rarely_legal_but_better_arm_wins_the_simultaneous_root() {
             "seed {seed}: returned the dominated arm, visits {} / availability {} \
              against {} / {}",
             marginals.visits(0),
-            marginals.availability(0),
+            marginals.times_available(0),
             marginals.visits(1),
-            marginals.availability(1)
+            marginals.times_available(1)
         );
     }
 }
@@ -840,7 +840,7 @@ fn a_manufactured_rate_does_not_win_a_wide_root() {
                 .expect("every choice is in the tree");
             (
                 child.visits(),
-                child.visits() as f64 / child.availability().max(1) as f64,
+                child.visits() as f64 / child.times_available().max(1) as f64,
             )
         };
         let (decoy_visits, decoy_rate) = rate(WideDecoy::DECOY);

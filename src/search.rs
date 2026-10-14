@@ -13,7 +13,7 @@ use crate::early_stop;
 use crate::game::{Game, JointChoices, PlayerSet, Rewards, SimultaneousPolicy, Status};
 use crate::node::{JointKey, Node};
 use crate::rank::{leader_of, Candidate};
-use crate::select::select;
+use crate::select::{select, ExplorationCount};
 use crate::util::below;
 #[cfg(debug_assertions)]
 use crate::util::hash_of;
@@ -179,7 +179,7 @@ pub struct SimultaneousConfig {
     /// [`crate::SimultaneousPolicy::Duct`].
     ///
     /// Same units and same scale as [`Config::exploration_constant`] — a
-    /// multiplier on `sqrt(ln availability / visits)`, on the reward scale — and
+    /// multiplier on `sqrt(ln times_available / visits)`, on the reward scale — and
     /// a separate field only because a simultaneous node's bandits are coupled.
     /// At a sequential node the constant sets how fast the bandit concentrates
     /// and the limit does not depend on it; at a simultaneous node the cycle two
@@ -452,7 +452,7 @@ struct Scratch<G: Game> {
     /// not from here.
     choices: Vec<G::Choice>,
     avail: Vec<bool>,
-    root_avail: Vec<bool>,
+    all_available: Vec<bool>,
     /// One child index per level, sequential or joint.
     path: Vec<u32>,
     /// One arm index per participant at the current level. At most eight;
@@ -472,15 +472,6 @@ struct Scratch<G: Game> {
     /// the tree, so no future determinization can introduce a new one. The
     /// early-termination proof needs this and the mask together.
     root_legal_complete: bool,
-    /// Whether the root has had a full expansion pass.
-    ///
-    /// A root re-rooted from a subtree has children, but only the handful
-    /// progressive expansion happened to create at its old position. "Has
-    /// children" is a different question, and answering it that way lets the
-    /// search pick a choice that is no longer legal. At a simultaneous root this
-    /// means every participant's arms are fully enumerated, not that any joint
-    /// successor exists.
-    root_fully_expanded: bool,
 }
 
 /// Owns every reusable allocation and the retained tree.
@@ -510,14 +501,13 @@ impl<G: Game> Searcher<G> {
                 state: template.new_buffer(),
                 choices: Vec::new(),
                 avail: Vec::new(),
-                root_avail: Vec::new(),
+                all_available: Vec::new(),
                 path: Vec::new(),
                 picks: Vec::new(),
                 sim_frames: Vec::new(),
                 sim_probs: Vec::new(),
                 root_legal: Vec::new(),
                 root_legal_complete: false,
-                root_fully_expanded: false,
             },
             side: Default::default(),
             root: None,
@@ -535,7 +525,6 @@ impl<G: Game> Searcher<G> {
     /// For handing a finished tree to something that outlives the searcher —
     /// an inspector or a UI thread. The next search starts fresh.
     pub fn take_tree(&mut self) -> Option<Node<G::Choice>> {
-        self.scratch.root_fully_expanded = false;
         self.tree_is_current = false;
         self.root.take()
     }
@@ -555,7 +544,6 @@ impl<G: Game> Searcher<G> {
     /// Discard the retained tree.
     pub fn clear_tree(&mut self) {
         self.root = None;
-        self.scratch.root_fully_expanded = false;
         self.tree_is_current = false;
     }
 
@@ -582,7 +570,6 @@ impl<G: Game> Searcher<G> {
         let Some(root) = self.root.as_mut() else {
             return false;
         };
-        self.scratch.root_fully_expanded = false;
         debug_assert!(
             root.simultaneous_players().is_none(),
             "mcts: reuse_subtree was called on a simultaneous root, whose successor \
@@ -622,7 +609,7 @@ impl<G: Game> Searcher<G> {
     /// same price a [`Searcher::reuse_subtree`] miss has always cost.
     ///
     /// The promoted node keeps its own marginal statistics, availability
-    /// included. A node's `availability` counts iterations at the parent that
+    /// included. A node's `times_available` counts iterations at the parent that
     /// was just discarded, which is why re-rooting resets it; an arm's counts
     /// iterations at *this* node, which are still valid and are still the
     /// denominator of its exploration term. Zeroing them would leave a
@@ -632,7 +619,6 @@ impl<G: Game> Searcher<G> {
         let Some(root) = self.root.as_mut() else {
             return false;
         };
-        self.scratch.root_fully_expanded = false;
         debug_assert!(
             root.simul().is_some(),
             "mcts: reuse_joint was called on a root that is not simultaneous, whose \
@@ -889,7 +875,6 @@ impl<G: Game> Searcher<G> {
 
         if self.root.is_none() {
             self.root = Some(Node::new_root(root_player));
-            self.scratch.root_fully_expanded = false;
         }
         state.init_side(ctx, &mut self.side);
 
@@ -1030,7 +1015,7 @@ fn root_answer<C>(root: &Node<C>, legal: &[bool]) -> Option<usize> {
             .map(|(i, child)| {
                 (
                     i,
-                    Candidate::new(child.visits, child.availability, child.cumulative_reward),
+                    Candidate::new(child.visits, child.times_available, child.cumulative_reward),
                 )
             }),
     )
@@ -1364,12 +1349,11 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
         state,
         choices,
         avail,
-        root_avail,
+        all_available,
         path,
         picks,
         sim_frames,
         sim_probs,
-        root_fully_expanded,
         ..
     } = scratch;
     path.clear();
@@ -1416,39 +1400,13 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                 // Marginal expansion is full on every visit, root or not; only
                 // the joint successors are lazy. See `Node::expand_marginals`.
                 let mut degenerate = false;
-                if G::ROOT_CHOICES_INVARIANT && node.is_root() && *root_fully_expanded {
-                    #[cfg(debug_assertions)]
-                    {
-                        for slot in 0..arity {
-                            let p = players.player_at(slot).expect("a slot has a participant");
-                            choices.clear();
-                            state.choices_for_into(ctx, p, choices);
-                            let simul = node.simul().expect("the block was just installed");
-                            assert_eq!(
-                                choices.len(),
-                                simul.slot_len(slot),
-                                "ROOT_CHOICES_INVARIANT is set, but this determinization \
-                                 offers player {p} {} choices where the tree holds {} marginals",
-                                choices.len(),
-                                simul.slot_len(slot)
-                            );
-                            for choice in choices.iter() {
-                                assert!(
-                                    simul.find_arm(slot, choice).is_some(),
-                                    "ROOT_CHOICES_INVARIANT is set, but this determinization \
-                                     offers player {p} a choice the tree has no marginal for"
-                                );
-                            }
-                        }
-                    }
-                    node.restamp_marginals(policy);
+                let choices_already_known =
+                    G::CHOICES_ON_REVISIT.are_same_at(node) && node.arms_match_choices();
+                if choices_already_known {
+                    debug_assert_arms_match_choices::<G>(node, players, state, ctx, choices);
+                    node.mark_every_arm_available(policy);
                 } else {
-                    // Only a pass that found every arm legal has *proved* the
-                    // tree's action set equals this position's. A root promoted
-                    // by `reuse_joint` carries arms from determinizations
-                    // reached at depth, and the fast path would restamp those
-                    // as available.
-                    let mut every_arm_legal = true;
+                    let mut every_arm_is_a_choice = true;
                     for slot in 0..arity {
                         let p = players.player_at(slot).expect("a slot has a participant");
                         choices.clear();
@@ -1470,11 +1428,9 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                             .simul()
                             .expect("the block was just installed")
                             .slot_len(slot);
-                        every_arm_legal &= legal == held;
+                        every_arm_is_a_choice &= legal == held;
                     }
-                    if !degenerate && every_arm_legal && node.is_root() {
-                        *root_fully_expanded = true;
-                    }
+                    node.set_arms_match_choices(!degenerate && every_arm_is_a_choice);
                 }
                 if degenerate {
                     rewards = G::Rewards::uniform(cfg.min_reward);
@@ -1544,73 +1500,30 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
             }
         };
 
-        // An already-expanded root whose choice set cannot vary needs neither
-        // enumeration nor expansion, which is the difference between paying for
-        // move generation once per search and once per iteration.
-        let reuse_root = G::ROOT_CHOICES_INVARIANT && node.is_root() && *root_fully_expanded;
-        let available: &[bool] = if reuse_root {
-            // Skipping enumeration is only sound if the choice set really is
-            // invariant. Check it where checking is affordable, so a game that
-            // sets the flag wrongly fails loudly instead of quietly returning a
-            // choice that is illegal in this determinization.
-            #[cfg(debug_assertions)]
-            {
-                choices.clear();
-                state.choices_into(ctx, choices);
-                assert_eq!(
-                    choices.len(),
-                    node.children.len(),
-                    "ROOT_CHOICES_INVARIANT is set, but this determinization has {} \
-                     root choices where the tree holds {} children",
-                    choices.len(),
-                    node.children.len()
-                );
-                for choice in choices.iter() {
-                    assert!(
-                        node.find_child(choice).is_some(),
-                        "ROOT_CHOICES_INVARIANT is set, but this determinization offers \
-                         a root choice the tree has no child for"
-                    );
-                }
-            }
-            // The invariant says every root child is legal in every
-            // determinization, so this iteration is an opportunity for all of
-            // them. Skipping the count here would leave availability frozen at
-            // whatever the first pass wrote while visits went on accumulating,
-            // and the root ranking divides one by the other. `ln_availability`
-            // is deliberately *not* kept with it, exactly as `Node::expand`
-            // leaves it at a root: `select` scores a root's children against
-            // the root's own visit count, and `reroot_at` resets the field on
-            // promotion, so this path would pay a libm call per child per
-            // iteration — the widest loop in the search — for a denominator
-            // with no reader.
-            for child in node.children.iter_mut() {
-                child.availability += 1;
-            }
-            root_avail.clear();
-            root_avail.resize(node.children.len(), true);
-            root_avail
+        let exploration_count = ExplorationCount::at::<G>(node);
+        let choices_already_known =
+            G::CHOICES_ON_REVISIT.are_same_at(node) && node.children_match_choices();
+        let available: &[bool] = if choices_already_known {
+            debug_assert_children_match_choices::<G>(node, state, ctx, choices);
+            mark_every_child_available(node, all_available)
         } else {
             choices.clear();
             state.choices_into(ctx, choices);
-            node.expand(choices, player, G::CHILD_INDEX_THRESHOLD, avail, rng);
-            // Same proof obligation as the simultaneous branch: the fast path
-            // marks every child available, so it may only be armed once a pass
-            // has shown the tree holds this position's choices and nothing else.
-            // A root that was never re-rooted has exactly them after the first
-            // pass, so it still arms on iteration 1.
-            if node.is_root()
-                && choices.len() == node.children.len()
-                && avail.iter().all(|&legal| legal)
-            {
-                *root_fully_expanded = true;
-            }
+            node.expand(
+                choices,
+                player,
+                G::CHILD_INDEX_THRESHOLD,
+                exploration_count,
+                avail,
+                rng,
+            );
             avail
         };
 
         let picked = select(
             node,
             available,
+            exploration_count,
             cfg.exploration_constant,
             cfg.progressive_bias_weight,
         );
@@ -1683,6 +1596,85 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
     rewards
 }
 
+/// What `Node::expand` would record at a node whose children already match
+/// its choices: one more opportunity for every child, which the root ranking
+/// divides by.
+fn mark_every_child_available<'a, C>(
+    node: &mut Node<C>,
+    all_available: &'a mut Vec<bool>,
+) -> &'a [bool] {
+    for child in node.children.iter_mut() {
+        child.times_available += 1;
+    }
+    all_available.clear();
+    all_available.resize(node.children.len(), true);
+    all_available
+}
+
+fn debug_assert_children_match_choices<G: Game>(
+    node: &Node<G::Choice>,
+    state: &G,
+    ctx: &G::Context,
+    choices: &mut Vec<G::Choice>,
+) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    choices.clear();
+    state.choices_into(ctx, choices);
+    let every_choice_has_a_child = choices
+        .iter()
+        .all(|choice| node.find_child(choice).is_some());
+    let every_child_is_a_choice = node.children.iter().all(|child| {
+        child
+            .choice
+            .as_ref()
+            .is_some_and(|choice| choices.contains(choice))
+    });
+    assert!(
+        every_choice_has_a_child && every_child_is_a_choice,
+        "mcts: CHOICES_ON_REVISIT is {:?}, but this visit to a node offers {} choices that \
+         do not match the {} children an earlier visit left there. The search would have \
+         selected among the earlier visit's choices.",
+        G::CHOICES_ON_REVISIT,
+        choices.len(),
+        node.children.len()
+    );
+}
+
+fn debug_assert_arms_match_choices<G: Game>(
+    node: &Node<G::Choice>,
+    players: PlayerSet,
+    state: &G,
+    ctx: &G::Context,
+    choices: &mut Vec<G::Choice>,
+) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let simul = node.simul().expect("a node with arms is simultaneous");
+    for (slot, player) in players.iter().enumerate() {
+        choices.clear();
+        state.choices_for_into(ctx, player, choices);
+        let every_choice_has_an_arm = choices
+            .iter()
+            .all(|choice| simul.find_arm(slot, choice).is_some());
+        let start = simul.starts[slot] as usize;
+        let every_arm_is_a_choice = simul.arm_choices[start..start + simul.slot_len(slot)]
+            .iter()
+            .all(|arm| choices.contains(arm));
+        assert!(
+            every_choice_has_an_arm && every_arm_is_a_choice,
+            "mcts: CHOICES_ON_REVISIT is {:?}, but this visit offers player {player} {} \
+             choices that do not match the {} arms an earlier visit left there. The search \
+             would have selected among the earlier visit's choices.",
+            G::CHOICES_ON_REVISIT,
+            choices.len(),
+            simul.slot_len(slot)
+        );
+    }
+}
+
 /// The descent's simultaneous levels, walked in step with the backup.
 ///
 /// A struct rather than eight more arguments, and a cursor rather than a lookup:
@@ -1749,7 +1741,7 @@ impl<G: Game> Backup<'_, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{PlayerSet, SimultaneousPolicy};
+    use crate::game::{ChoicesOnRevisit, PlayerSet, SimultaneousPolicy};
     use crate::util::below;
     use rand_core::SeedableRng;
     use wyrand::WyRand;
@@ -1771,20 +1763,24 @@ mod tests {
     }
 
     /// One simultaneous ply and nothing else. The two consts pick the policy and
-    /// the root fast path, because both are associated consts and each
-    /// combination therefore needs its own type.
+    /// what the root's choices do on revisit, because both are associated consts
+    /// and each combination therefore needs its own type.
     #[derive(Clone, Default)]
-    struct Rps<const MIXED: bool, const INVARIANT: bool> {
+    struct Rps<const MIXED: bool, const SAME_AT_ROOT: bool> {
         payoff: Option<f64>,
     }
 
-    impl<const MIXED: bool, const INVARIANT: bool> Game for Rps<MIXED, INVARIANT> {
+    impl<const MIXED: bool, const SAME_AT_ROOT: bool> Game for Rps<MIXED, SAME_AT_ROOT> {
         type Choice = u8;
         type Rewards = [f64; 2];
         type Context = ();
         type Side = ();
 
-        const ROOT_CHOICES_INVARIANT: bool = INVARIANT;
+        const CHOICES_ON_REVISIT: ChoicesOnRevisit = if SAME_AT_ROOT {
+            ChoicesOnRevisit::SameAtRoot
+        } else {
+            ChoicesOnRevisit::MayChange
+        };
         const SIMULTANEOUS_POLICY: SimultaneousPolicy = if MIXED {
             SimultaneousPolicy::RegretMatching
         } else {
@@ -2095,7 +2091,7 @@ mod tests {
     }
 
     /// The invariant fast path skips move generation but must not skip the
-    /// availability stamp: an arm whose `availability` stops growing keeps a
+    /// availability stamp: an arm whose `times_available` stops growing keeps a
     /// stale exploration bonus and a strategy average divided by the wrong
     /// denominator.
     #[test]
@@ -2109,7 +2105,7 @@ mod tests {
             let marginals = tree.marginals(player).expect("this player acts here");
             assert_eq!(marginals.len(), 3);
             for arm in 0..marginals.len() {
-                assert_eq!(marginals.availability(arm), result.root_visits);
+                assert_eq!(marginals.times_available(arm), result.root_visits);
             }
             let selected: u32 = (0..marginals.len()).map(|a| marginals.visits(a)).sum();
             assert_eq!(selected, result.root_visits);
@@ -2122,7 +2118,7 @@ mod tests {
     /// by it — and must not pay a libm call per child per iteration for a
     /// denominator with no reader.
     #[test]
-    fn an_invariant_root_counts_availability_without_caching_its_logarithm() {
+    fn an_invariant_root_counts_times_available_without_caching_its_logarithm() {
         /// A sequential root whose four choices are legal in every
         /// determinization, so the fast path takes over from iteration 2.
         #[derive(Clone, Default)]
@@ -2136,7 +2132,7 @@ mod tests {
             type Context = ();
             type Side = ();
 
-            const ROOT_CHOICES_INVARIANT: bool = true;
+            const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameAtRoot;
 
             fn status(&self, _ctx: &()) -> Status<[f64; 2]> {
                 match self.picked {
@@ -2185,11 +2181,11 @@ mod tests {
         assert_eq!(root.children().len(), 4);
         for child in root.children() {
             assert_eq!(
-                child.availability, result.root_visits,
+                child.times_available, result.root_visits,
                 "every root child is legal in every determinization"
             );
             assert_eq!(
-                child.ln_availability, 0.0,
+                child.ln_times_available, 0.0,
                 "a root child's exploration denominator has no reader"
             );
         }

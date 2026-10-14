@@ -286,7 +286,7 @@ where
                         merged.add(
                             index,
                             stats[arm].visits,
-                            stats[arm].availability,
+                            stats[arm].times_available,
                             stats[arm].cumulative_reward,
                         );
                         if mixes {
@@ -315,7 +315,7 @@ where
                         merged.add(
                             index,
                             child.visits(),
-                            child.availability,
+                            child.times_available,
                             child.cumulative_reward(),
                         );
                     }
@@ -402,7 +402,7 @@ struct Merged<C> {
     /// The opportunities those visits were drawn from, pooled over the same
     /// trees. The ranking divides one by the other, so a worker that
     /// contributes visits has to contribute the window they came out of.
-    availability: Vec<u32>,
+    times_available: Vec<u32>,
     reward: Vec<f64>,
     strategy: Vec<f64>,
 }
@@ -413,7 +413,7 @@ impl<C: Clone + Eq + Hash> Merged<C> {
             order: Vec::new(),
             position: FxHashMap::default(),
             visits: Vec::new(),
-            availability: Vec::new(),
+            times_available: Vec::new(),
             reward: Vec::new(),
             strategy: Vec::new(),
         }
@@ -434,7 +434,7 @@ impl<C: Clone + Eq + Hash> Merged<C> {
                 self.order.push(choice.clone());
                 self.position.insert(choice.clone(), index);
                 self.visits.push(0);
-                self.availability.push(0);
+                self.times_available.push(0);
                 self.reward.push(0.0);
                 self.strategy.push(0.0);
                 index
@@ -458,9 +458,9 @@ impl<C: Clone + Eq + Hash> Merged<C> {
     }
 
     /// Pool one tree's statistics for `choice` into the entry at `index`.
-    fn add(&mut self, index: usize, visits: u32, availability: u32, reward: f64) {
+    fn add(&mut self, index: usize, visits: u32, times_available: u32, reward: f64) {
         self.visits[index] += visits;
-        self.availability[index] += availability;
+        self.times_available[index] += times_available;
         self.reward[index] += reward;
     }
 
@@ -475,7 +475,7 @@ impl<C: Clone + Eq + Hash> Merged<C> {
                 index,
                 Candidate::new(
                     self.visits[index],
-                    self.availability[index],
+                    self.times_available[index],
                     self.reward[index],
                 ),
             )
@@ -531,7 +531,7 @@ fn sample_merged<R: Rng + ?Sized>(strategy: &[f64], rng: &mut R) -> Option<usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{JointChoices, PlayerSet, SimultaneousPolicy, Status};
+    use crate::game::{ChoicesOnRevisit, JointChoices, PlayerSet, SimultaneousPolicy, Status};
     use crate::search::SimultaneousConfig;
     use crate::util::below;
     use rand_core::SeedableRng;
@@ -801,7 +801,7 @@ mod tests {
         type Context = G::Context;
         type Side = G::Side;
 
-        const ROOT_CHOICES_INVARIANT: bool = G::ROOT_CHOICES_INVARIANT;
+        const CHOICES_ON_REVISIT: ChoicesOnRevisit = G::CHOICES_ON_REVISIT;
         const CHILD_INDEX_THRESHOLD: usize = G::CHILD_INDEX_THRESHOLD;
         const SIMULTANEOUS_POLICY: SimultaneousPolicy = SimultaneousPolicy::Duct;
 

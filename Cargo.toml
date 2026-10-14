@@ -52,7 +52,7 @@ harness = false
 # Tests run optimized. The suite is dominated by search loops — the sequential
 # fingerprint alone runs 405 searches — and at `opt-level = 0` that is minutes
 # per run rather than seconds, which is a cost paid on every edit. Debug
-# assertions stay on: they are what the `ROOT_CHOICES_INVARIANT` and node-kind
+# assertions stay on: they are what the `CHOICES_ON_REVISIT` and node-kind
 # checks exist for, and running the suite without them would test a different
 # crate.
 [profile.test]

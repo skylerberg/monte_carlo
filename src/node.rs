@@ -5,6 +5,7 @@ use hashbrown::HashTable;
 use rand_core::Rng;
 
 use crate::game::{PlayerSet, SimultaneousPolicy};
+use crate::select::ExplorationCount;
 use crate::util::{below, hash_of};
 
 /// A node in the search tree.
@@ -16,20 +17,20 @@ use crate::util::{below, hash_of};
 /// node. A node is never both, so the two share one allocation.
 pub struct Node<C> {
     pub(crate) cumulative_reward: f64,
-    /// Cached `ln(availability)`, refreshed only when `availability` changes —
+    /// Cached `ln(times_available)`, refreshed only when `times_available` changes —
     /// and only at a non-root parent, the only place `select` reads it.
-    pub(crate) ln_availability: f64,
+    pub(crate) ln_times_available: f64,
     pub(crate) children: Vec<Node<C>>,
     pub(crate) extra: Option<Box<Extra<C>>>,
     pub(crate) visits: u32,
     /// Iterations in which this choice was legal at its parent. The exploration
     /// term uses this rather than the parent's visit count, so a choice that is
     /// rarely legal is not penalised for being rarely tried.
-    pub(crate) availability: u32,
+    pub(crate) times_available: u32,
     pub(crate) heuristic_bias: f32,
     /// The player whose reward `cumulative_reward` accumulates.
     pub(crate) player: u8,
-    pub(crate) kind: NodeKind,
+    pub(crate) kind_and_match: KindAndMatch,
     /// `Some` only when `kind == NodeKind::Choice`.
     pub(crate) choice: Option<C>,
 }
@@ -53,6 +54,45 @@ pub enum NodeKind {
     /// is `None`; the marginal indices live in the parent — see
     /// [`Node::joint_arm`].
     Joint = 2,
+}
+
+/// A node's [`NodeKind`], and whether its children — or, at a simultaneous
+/// node, its arms — are exactly the choices it was last enumerated with.
+///
+/// One byte for both because `Node<u8>` fills 64 bytes with no padding to
+/// spare, and a separate `bool` would put every node of such a tree across two
+/// cache lines.
+#[derive(Clone, Copy)]
+pub(crate) struct KindAndMatch(u8);
+
+impl KindAndMatch {
+    const KIND_BITS: u8 = 0b11;
+    const MATCH_BIT: u8 = 0b100;
+
+    fn new(kind: NodeKind) -> Self {
+        Self(kind as u8)
+    }
+
+    #[inline(always)]
+    fn kind(self) -> NodeKind {
+        const ROOT: u8 = NodeKind::Root as u8;
+        const CHOICE: u8 = NodeKind::Choice as u8;
+        match self.0 & Self::KIND_BITS {
+            ROOT => NodeKind::Root,
+            CHOICE => NodeKind::Choice,
+            _ => NodeKind::Joint,
+        }
+    }
+
+    #[inline(always)]
+    fn edges_match_choices(self) -> bool {
+        self.0 & Self::MATCH_BIT != 0
+    }
+
+    fn with_edges_match_choices(self, matched: bool) -> Self {
+        let match_bit = if matched { Self::MATCH_BIT } else { 0 };
+        Self(self.0 & Self::KIND_BITS | match_bit)
+    }
 }
 
 /// What leads to a [`Node`]: the incoming edge, with whatever it carries.
@@ -186,16 +226,16 @@ pub(crate) struct ArmStats {
     /// Cumulative reward for this arm's own player, on the game's raw scale, so
     /// `Marginals::mean_reward` and `Duct` read a real reward.
     pub(crate) cumulative_reward: f64,
-    /// Cached `ln(availability)`, the arm's ISMCTS exploration denominator.
+    /// Cached `ln(times_available)`, the arm's ISMCTS exploration denominator.
     /// Maintained only under `SimultaneousPolicy::Duct`, which is the only
     /// reader; a mixing policy leaves it at zero rather than paying an `ln` per
     /// arm per visit. The field itself stays either way — dropping it would
     /// take `ArmStats` off its 32-byte stride, where `avail_epoch` rides the
     /// same line as the statistics.
-    pub(crate) ln_availability: f64,
+    pub(crate) ln_times_available: f64,
     pub(crate) visits: u32,
     /// Iterations at this node in which this action was legal for this player.
-    pub(crate) availability: u32,
+    pub(crate) times_available: u32,
     /// The node's visit count at the last iteration in which this arm was
     /// legal.
     ///
@@ -216,9 +256,9 @@ impl Default for ArmStats {
     fn default() -> Self {
         Self {
             cumulative_reward: 0.0,
-            ln_availability: 0.0,
+            ln_times_available: 0.0,
             visits: 0,
-            availability: 0,
+            times_available: 0,
             avail_epoch: u32::MAX,
         }
     }
@@ -373,21 +413,45 @@ impl<C> Node<C> {
     fn new(player: u8, kind: NodeKind, choice: Option<C>) -> Self {
         Self {
             cumulative_reward: 0.0,
-            ln_availability: 0.0,
+            ln_times_available: 0.0,
             children: Vec::new(),
             extra: None,
             visits: 0,
-            availability: 1,
+            times_available: 1,
             heuristic_bias: 0.0,
             player,
-            kind,
+            kind_and_match: KindAndMatch::new(kind),
             choice,
         }
     }
 
     #[inline(always)]
     pub(crate) fn is_root(&self) -> bool {
-        matches!(self.kind, NodeKind::Root)
+        matches!(self.kind(), NodeKind::Root)
+    }
+
+    #[inline(always)]
+    pub(crate) fn children_match_choices(&self) -> bool {
+        self.kind_and_match.edges_match_choices()
+    }
+
+    #[inline(always)]
+    pub(crate) fn arms_match_choices(&self) -> bool {
+        self.kind_and_match.edges_match_choices()
+    }
+
+    pub(crate) fn set_arms_match_choices(&mut self, matched: bool) {
+        self.kind_and_match = self.kind_and_match.with_edges_match_choices(matched);
+    }
+
+    /// Turn this node into the root of its own tree, clearing what was proved
+    /// about its choices: that proof was about a position the caller has now
+    /// moved on from.
+    fn become_root(&mut self) {
+        self.kind_and_match = KindAndMatch::new(NodeKind::Root);
+        self.choice = None;
+        self.times_available = 1;
+        self.ln_times_available = 0.0;
     }
 
     /// Times this node was visited.
@@ -399,15 +463,15 @@ impl<C> Node<C> {
     /// the denominator [`Node::visits`] is a numerator of.
     ///
     /// A child can only be selected on an iteration whose determinization made
-    /// it legal, so `visits <= availability` always and the ratio — not the
+    /// it legal, so `visits <= times_available` always and the ratio — not the
     /// visit count — is how often the search took the choice given the chance.
     /// That ratio is how a root's answer is ranked, and this is what lets a
     /// caller reproduce or log the ranking from [`crate::Searcher::tree`].
     /// Read it on a child. A root has no parent to have been offered by, so its
     /// own count is either the 1 it was created with or whatever it carried up
     /// from the node it was promoted from.
-    pub fn availability(&self) -> u32 {
-        self.availability
+    pub fn times_available(&self) -> u32 {
+        self.times_available
     }
 
     /// Mean reward for the player this node accumulates for, or 0.0 if never
@@ -433,7 +497,7 @@ impl<C> Node<C> {
     /// choice. Use [`Edge::choice`] only where you already know which kind you
     /// hold.
     pub fn edge(&self) -> Edge<'_, C> {
-        match self.kind {
+        match self.kind() {
             NodeKind::Root => Edge::Root,
             NodeKind::Joint => Edge::Joint,
             NodeKind::Choice => Edge::Choice(
@@ -465,7 +529,7 @@ impl<C> Node<C> {
 
     /// Which of the three things this node is.
     pub fn kind(&self) -> NodeKind {
-        self.kind
+        self.kind_and_match.kind()
     }
 
     /// The player whose reward [`Node::cumulative_reward`] accumulates.
@@ -578,24 +642,19 @@ impl<C> Node<C> {
         }
     }
 
-    /// Bump every arm's availability without enumerating a single move.
-    ///
-    /// The `Game::ROOT_CHOICES_INVARIANT` fast path at a simultaneous root:
-    /// move generation is what the invariant saves, and the stamp is
-    /// `sum(|A_i|)` word writes, the same order as the sequential path's
-    /// `root_avail.resize` — which it would not be if it issued a libm call per
-    /// arm on top, so the cached logarithm is refreshed only for the policy
-    /// that reads it.
-    pub(crate) fn restamp_marginals(&mut self, policy: SimultaneousPolicy) {
+    /// What a full expansion pass would record at a node whose arms already
+    /// match its choices, without enumerating a single move: `sum(|A_i|)` word
+    /// writes, and a libm call per arm only for the policy that reads one.
+    pub(crate) fn mark_every_arm_available(&mut self, policy: SimultaneousPolicy) {
         let epoch = self.visits;
-        let caches_ln = policy.reads_ln_availability();
+        let caches_ln = policy.reads_ln_times_available();
         let simul = self
             .simul_mut()
-            .expect("mcts: only a simultaneous node has marginals to restamp");
+            .expect("mcts: only a simultaneous node has arms");
         for arm in &mut simul.arm_stats {
-            arm.availability += 1;
+            arm.times_available += 1;
             if caches_ln {
-                arm.ln_availability = (arm.availability as f64).ln();
+                arm.ln_times_available = (arm.times_available as f64).ln();
             }
             arm.avail_epoch = epoch;
         }
@@ -653,10 +712,7 @@ impl<C> Node<C> {
             return false;
         };
         let mut child = self.children.swap_remove(i);
-        child.kind = NodeKind::Root;
-        child.choice = None;
-        child.availability = 1;
-        child.ln_availability = 0.0;
+        child.become_root();
         *self = child;
         true
     }
@@ -752,7 +808,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
 
     /// Record this iteration's legal choices, and grow the tree by one child.
     ///
-    /// Every already-present child that is legal now has its availability count
+    /// Every already-present child that is legal now has its `times_available`
     /// bumped, and `avail[i]` is set for it. The root creates a child for every
     /// legal choice; other nodes create exactly one, reservoir-sampled uniformly
     /// from the choices they have not seen yet. Sampling rather than shuffling
@@ -763,6 +819,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
         choices: &[C],
         player: u8,
         threshold: usize,
+        exploration_count: ExplorationCount,
         avail: &mut Vec<bool>,
         rng: &mut R,
     ) {
@@ -776,27 +833,23 @@ impl<C: Clone + Eq + Hash> Node<C> {
 
         let mut unseen: u64 = 0;
         let mut sampled = usize::MAX;
+        let mut legal_children = 0;
 
         for (i, choice) in choices.iter().enumerate() {
             match self.find_child(choice) {
                 // A duplicate within `choices` must not be counted twice.
                 Some(k) if avail[k] => {}
                 Some(k) => {
+                    legal_children += 1;
                     let child = &mut self.children[k];
-                    child.availability += 1;
-                    // Only a non-root parent scores its children against their
-                    // own availability: at a root `select` uses the root's
-                    // visit count, and `reroot_at` resets the field on the one
-                    // promotion that could make a root child read it again. So
-                    // a root child pays the increment, which the root ranking
-                    // divides by, and not the `ln` for a denominator nothing
-                    // reads.
-                    if !is_root {
-                        child.ln_availability = (child.availability as f64).ln();
+                    child.times_available += 1;
+                    if exploration_count == ExplorationCount::TimesAvailable {
+                        child.ln_times_available = (child.times_available as f64).ln();
                     }
                     avail[k] = true;
                 }
                 None if is_root => {
+                    legal_children += 1;
                     self.push_child(choice.clone(), player, threshold);
                     avail.push(true);
                 }
@@ -810,9 +863,16 @@ impl<C: Clone + Eq + Hash> Node<C> {
         }
 
         if !is_root && sampled != usize::MAX {
+            legal_children += 1;
             self.push_child(choices[sampled].clone(), player, threshold);
             avail.push(true);
         }
+
+        let every_choice_has_a_child = is_root || unseen <= 1;
+        let every_child_is_a_choice = legal_children == self.children.len();
+        self.kind_and_match = self
+            .kind_and_match
+            .with_edges_match_choices(every_choice_has_a_child && every_child_is_a_choice);
     }
 
     /// Record this iteration's legal actions for one participant, creating an
@@ -826,8 +886,8 @@ impl<C: Clone + Eq + Hash> Node<C> {
     /// the joint successors — and the quantity that is cheap is `sum(|A_i|)`,
     /// which is the entire reason to decouple. Expanding the arms progressively
     /// would optimize the term that was already cheap, and it would cost
-    /// correctness twice: an arm created at visit `v` has `availability == 1`,
-    /// so `ln_availability == 0` and no exploration bonus at all, while its
+    /// correctness twice: an arm created at visit `v` has `times_available == 1`,
+    /// so `ln_times_available == 0` and no exploration bonus at all, while its
     /// siblings compete on a full history — and every mixed policy normalizes
     /// over a support, so a support that keeps growing makes the time-averaged
     /// strategy an average over incomparable supports, which is not an
@@ -841,7 +901,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
     ) -> usize {
         let epoch = self.visits;
         let policy_in_use = policy.mixes();
-        let caches_ln = policy.reads_ln_availability();
+        let caches_ln = policy.reads_ln_times_available();
         let simul = self
             .simul_mut()
             .expect("mcts: marginals belong to a simultaneous node");
@@ -866,9 +926,9 @@ impl<C: Clone + Eq + Hash> Node<C> {
                 Some(a) if simul.arm_stats[a].avail_epoch == epoch => {}
                 Some(a) => {
                     let arm = &mut simul.arm_stats[a];
-                    arm.availability += 1;
+                    arm.times_available += 1;
                     if caches_ln {
-                        arm.ln_availability = (arm.availability as f64).ln();
+                        arm.ln_times_available = (arm.times_available as f64).ln();
                     }
                     arm.avail_epoch = epoch;
                     legal += 1;
@@ -1054,7 +1114,7 @@ impl<C: Clone + Eq + Hash> Simul<C> {
         self.arm_stats.insert(
             at,
             ArmStats {
-                availability: 1,
+                times_available: 1,
                 avail_epoch: epoch,
                 ..Default::default()
             },
@@ -1115,10 +1175,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
             return false;
         };
         let mut child = self.children.swap_remove(i);
-        child.kind = NodeKind::Root;
-        child.choice = None;
-        child.availability = 1;
-        child.ln_availability = 0.0;
+        child.become_root();
         *self = child;
         true
     }
@@ -1180,8 +1237,8 @@ impl<'a, C> Marginals<'a, C> {
     /// simultaneous node, a root included — which is where an arm parts company
     /// with a child, since a root's children are scored against the root's own
     /// visit count and only the levels below it use this rule.
-    pub fn availability(&self, arm: usize) -> u32 {
-        self.stats[arm].availability
+    pub fn times_available(&self, arm: usize) -> u32 {
+        self.stats[arm].times_available
     }
 
     /// Mean reward of this arm for its own player, or 0.0 if never selected.
@@ -1451,66 +1508,80 @@ mod tests {
         let simul = node.simul().unwrap();
         assert_eq!(simul.arm_stats.len(), 70);
         for arm in &simul.arm_stats {
-            assert_eq!(arm.availability, 2);
+            assert_eq!(arm.times_available, 2);
             assert_eq!(arm.avail_epoch, 1);
-            assert_eq!(arm.ln_availability, 2.0f64.ln());
+            assert_eq!(arm.ln_times_available, 2.0f64.ln());
         }
     }
 
-    /// `ln_availability` is `Duct`'s exploration denominator and nothing else
+    /// `ln_times_available` is `Duct`'s exploration denominator and nothing else
     /// reads it, so a mixing policy must not pay a libm call per arm per visit
     /// to maintain it. The availability *count* is read by every policy, so it
     /// keeps moving either way.
     #[test]
-    fn only_duct_pays_for_the_availability_logarithm() {
+    fn only_duct_pays_for_ln_times_available() {
         for (policy, expected) in [(DUCT, 2.0f64.ln()), (RM, 0.0)] {
             let mut node = expanded_node(4, policy);
             for arm in &node.simul().unwrap().arm_stats {
-                assert_eq!(arm.availability, 2);
-                assert_eq!(arm.ln_availability, expected);
+                assert_eq!(arm.times_available, 2);
+                assert_eq!(arm.ln_times_available, expected);
             }
 
-            // The `ROOT_CHOICES_INVARIANT` fast path stamps the same arms
-            // without enumerating them, and has the same reason not to.
+            // A node whose arms already match its choices stamps the same
+            // arms without enumerating them, and has the same reason not to.
             node.record(0.0);
-            node.restamp_marginals(policy);
+            node.mark_every_arm_available(policy);
             let expected = if policy == DUCT { 3.0f64.ln() } else { 0.0 };
             for arm in &node.simul().unwrap().arm_stats {
-                assert_eq!(arm.availability, 3);
-                assert_eq!(arm.ln_availability, expected);
+                assert_eq!(arm.times_available, 3);
+                assert_eq!(arm.ln_times_available, expected);
             }
         }
     }
 
-    /// `select` scores a root's children against the root's own visit count,
-    /// so a root child's `ln_availability` has no reader — and a search at a
-    /// root that enumerates its choices every iteration would otherwise pay a
-    /// libm call for each of them.
+    /// A node whose children are explored against its own visits has no reader
+    /// for a child's `ln_times_available`, and a node that enumerates its
+    /// choices every visit would otherwise pay a libm call for each of them.
     #[test]
-    fn a_root_child_pays_no_availability_logarithm() {
+    fn only_a_times_available_count_pays_for_its_logarithm() {
         let choices: Vec<u16> = (0..4).collect();
         let mut avail = Vec::new();
         let mut rng = WyRand::seed_from_u64(1);
 
         let mut root = Node::new_root(0);
         for _ in 0..2 {
-            root.expand(&choices, 0, usize::MAX, &mut avail, &mut rng);
+            root.expand(
+                &choices,
+                0,
+                usize::MAX,
+                ExplorationCount::ParentVisits,
+                &mut avail,
+                &mut rng,
+            );
         }
         assert_eq!(root.children.len(), choices.len());
         for child in &root.children {
-            assert_eq!(child.availability, 2);
-            assert_eq!(child.ln_availability, 0.0);
+            assert_eq!(child.times_available, 2);
+            assert_eq!(child.ln_times_available, 0.0);
         }
 
-        // The same expansion under a non-root parent, where `select` does read
-        // the field, must still cache it.
         let mut inner = Node::new(0, NodeKind::Choice, Some(9u16));
         for _ in 0..5 {
-            inner.expand(&choices, 0, usize::MAX, &mut avail, &mut rng);
+            inner.expand(
+                &choices,
+                0,
+                usize::MAX,
+                ExplorationCount::TimesAvailable,
+                &mut avail,
+                &mut rng,
+            );
         }
         let opened = &inner.children[0];
-        assert!(opened.availability > 1);
-        assert_eq!(opened.ln_availability, (opened.availability as f64).ln());
+        assert!(opened.times_available > 1);
+        assert_eq!(
+            opened.ln_times_available,
+            (opened.times_available as f64).ln()
+        );
     }
 
     /// The arm index's payloads are slot-relative so that growing a slot moves
@@ -1551,7 +1622,7 @@ mod tests {
     fn a_mixed_policy_sums_to_one() {
         let mut simul = simul_of(PlayerSet::first_n(2), &[&[1, 2, 3], &[4, 5]], true);
         for (i, arm) in simul.arm_stats.iter_mut().enumerate() {
-            arm.availability = i as u32 + 1;
+            arm.times_available = i as u32 + 1;
         }
         for (i, arm) in simul.arm_policy.iter_mut().enumerate() {
             arm.strategy_sum = i as f64;
@@ -1562,7 +1633,7 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert!((out.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         // First arm has no strategy mass; the rest are weighted by
-        // strategy_sum / availability, which is 0/1, 1/2, 2/3 here.
+        // strategy_sum / times_available, which is 0/1, 1/2, 2/3 here.
         assert_eq!(out[0], 0.0);
         assert!(out[2] > out[1]);
 
@@ -1589,7 +1660,7 @@ mod tests {
         // more often than it was offered, and the ranking divides one by the
         // other.
         for arm in simul.arm_stats.iter_mut() {
-            arm.availability = 8;
+            arm.times_available = 8;
         }
         simul.arm_stats[1].visits = 5;
         simul.arm_stats[2].visits = 3;
@@ -1610,7 +1681,7 @@ mod tests {
         let mut simul = simul_of(PlayerSet::first_n(2), &[&[1, 2, 3], &[4, 5]], false);
         for (arm, reward) in simul.arm_stats.iter_mut().zip([20.0, 36.0, 28.0]) {
             arm.visits = 40;
-            arm.availability = 40;
+            arm.times_available = 40;
             arm.cumulative_reward = reward;
         }
 
@@ -1633,7 +1704,7 @@ mod tests {
     fn a_masked_mixed_policy_renormalizes_over_the_legal_arms() {
         let mut simul = simul_of(PlayerSet::first_n(2), &[&[1, 2, 3], &[4, 5]], true);
         for arm in simul.arm_stats.iter_mut() {
-            arm.availability = 4;
+            arm.times_available = 4;
         }
         for (i, arm) in simul.arm_policy.iter_mut().enumerate() {
             arm.strategy_sum = i as f64 + 1.0;
@@ -1721,7 +1792,7 @@ mod tests {
         assert_eq!(node.kind(), NodeKind::Root);
         assert!(node.is_root());
         assert_eq!(node.visits(), 1);
-        assert_eq!(node.availability, 1);
+        assert_eq!(node.times_available, 1);
         assert_eq!(node.marginals(0).unwrap().len(), 2);
         assert_eq!(*node.marginals(0).unwrap().choice(1), 8);
 

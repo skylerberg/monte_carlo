@@ -18,8 +18,8 @@ mod common;
 use common::*;
 use mcts::rand_core::{Rng, SeedableRng};
 use mcts::{
-    Config, Edge, Game, JointChoices, NodeKind, PlayerSet, RootPolicy, SearchResult, Searcher,
-    SimultaneousConfig, SimultaneousPolicy, Status, StopReason,
+    ChoicesOnRevisit, Config, Edge, Game, JointChoices, NodeKind, PlayerSet, RootPolicy,
+    SearchResult, Searcher, SimultaneousConfig, SimultaneousPolicy, Status, StopReason,
 };
 use wyrand::WyRand;
 
@@ -119,7 +119,7 @@ impl<G: Game> Game for Ducted<G> {
     type Context = G::Context;
     type Side = G::Side;
 
-    const ROOT_CHOICES_INVARIANT: bool = G::ROOT_CHOICES_INVARIANT;
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = G::CHOICES_ON_REVISIT;
     const CHILD_INDEX_THRESHOLD: usize = G::CHILD_INDEX_THRESHOLD;
     const SIMULTANEOUS_POLICY: SimultaneousPolicy = SimultaneousPolicy::Duct;
 
@@ -902,11 +902,12 @@ fn a_rarely_legal_action_is_not_starved() {
     // shows up in the assertions below, which would both be satisfied by an
     // ordinary always-legal arm.
     assert!(
-        marginals.availability(scissors) > 0 && marginals.availability(scissors) < root.visits(),
+        marginals.times_available(scissors) > 0
+            && marginals.times_available(scissors) < root.visits(),
         "scissors was available on {} of the root's {} iterations; legality never \
          varied, so this measures an always-legal arm and proves nothing about the \
          availability correction",
-        marginals.availability(scissors),
+        marginals.times_available(scissors),
         root.visits()
     );
 
@@ -921,21 +922,21 @@ fn a_rarely_legal_action_is_not_starved() {
                 continue;
             }
             assert_eq!(
-                all.availability(arm),
+                all.times_available(arm),
                 root.visits(),
                 "player {player}'s arm {arm} plays {}, which every determinization \
                  offers, yet it was counted available on {} of {} iterations",
                 all.choice(arm),
-                all.availability(arm),
+                all.times_available(arm),
                 root.visits()
             );
         }
     }
 
-    let availability = f64::from(marginals.availability(scissors)) / f64::from(root.visits());
+    let available_rate = f64::from(marginals.times_available(scissors)) / f64::from(root.visits());
     assert!(
-        (availability - VARIABLE_RPS_SCISSORS_RATE).abs() < 0.02,
-        "scissors was available on {availability} of the iterations, not \
+        (available_rate - VARIABLE_RPS_SCISSORS_RATE).abs() < 0.02,
+        "scissors was available on {available_rate} of the iterations, not \
          {VARIABLE_RPS_SCISSORS_RATE}; the availability counter is not tracking \
          determinization"
     );
@@ -1310,7 +1311,7 @@ fn same_seed_gives_the_same_simultaneous_search() {
                         (
                             *marginals.choice(arm),
                             marginals.visits(arm),
-                            marginals.availability(arm),
+                            marginals.times_available(arm),
                             marginals.mean_reward(arm),
                         )
                     })

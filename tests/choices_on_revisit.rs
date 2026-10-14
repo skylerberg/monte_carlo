@@ -1,22 +1,21 @@
-//! The `Game::ROOT_CHOICES_INVARIANT` fast path, against a re-rooted tree.
+//! What `Game::CHOICES_ON_REVISIT` lets the search skip, and what it must not.
 //!
-//! The flag promises that the *root's* choice set does not vary across
-//! determinizations, and the fast path it buys skips move generation and marks
-//! every arm — or every child — available. What it must not do is skip the
-//! proof that the tree's action set is the position's: a node one ply down
-//! accumulates the union of every chance outcome that reached it, and
-//! `reuse_subtree` and `reuse_joint` promote exactly such a node to root. The
-//! flag being a true claim about determinizations says nothing about the arms
-//! that promotion carried in.
+//! A node whose choices are the same on every visit, and whose children or arms
+//! already match them, is never enumerated again: every child or arm is marked
+//! available instead. What the skip must not do is trust a match nobody proved:
+//! a node one ply down accumulates the union of every chance outcome that
+//! reached it, and `reuse_subtree` and `reuse_joint` promote exactly such a
+//! node to root. `SameAtRoot` being a true claim about determinizations says
+//! nothing about the arms that promotion carried in.
 //!
-//! Every fixture here determinizes by cloning, so the invariant they declare is
-//! genuinely true and the failures below cannot be blamed on the game. They are
-//! local rather than shared because nothing in `tests/common` puts a chance
-//! draw between two plies, which is what makes a node's action set depend on
-//! how it was reached.
+//! Every fixture here determinizes by cloning, so the claim each declares is
+//! genuinely true, except the one built to lie, and the failures below cannot
+//! be blamed on the game. They are local rather than shared because nothing in
+//! `tests/common` puts a chance draw between two plies, which is what makes a
+//! node's action set depend on how it was reached.
 
 use mcts::rand_core::{Rng, SeedableRng};
-use mcts::{Config, Game, JointChoices, Node, PlayerSet, Searcher, Status};
+use mcts::{ChoicesOnRevisit, Config, Game, JointChoices, Node, PlayerSet, Searcher, Status};
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use wyrand::WyRand;
@@ -53,8 +52,8 @@ fn payoff(choice: u8) -> f64 {
 /// Two simultaneous plies, with a chance draw resolved by the first deciding
 /// whether player 0 still holds [`EDGE`] at the second.
 ///
-/// The determinization is an exact clone, so `ROOT_CHOICES_INVARIANT` is a true
-/// claim at both roots: at the first ply nobody holds `EDGE`, and at the second
+/// The determinization is an exact clone, so `SameAtRoot` is a true claim at
+/// both roots: at the first ply nobody holds `EDGE`, and at the second
 /// the draw has already happened and every determinization of that position
 /// agrees about it. The tree does not: the ply-2 node is reached under both
 /// outcomes and its arms are their union.
@@ -81,7 +80,7 @@ impl Game for ChanceRounds {
     type Context = ();
     type Side = ();
 
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameAtRoot;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.round >= 2 {
@@ -157,7 +156,7 @@ impl Game for ChanceLine {
     type Context = ();
     type Side = ();
 
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameAtRoot;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.round >= 2 {
@@ -225,24 +224,24 @@ fn most_visited_tuple(node: &Node<u8>) -> (usize, Vec<(u8, u8)>) {
     (child, played)
 }
 
-/// `player`'s `(visits, availability)` for `action` at `node`, or `None` if the
-/// node holds no arm for it.
+/// `player`'s `(visits, times_available)` for `action` at `node`, or `None` if
+/// the node holds no arm for it.
 fn arm(node: &Node<u8>, player: u8, action: u8) -> Option<(u32, u32)> {
     let marginals = node.marginals(player)?;
     (0..marginals.len())
         .find(|&arm| *marginals.choice(arm) == action)
-        .map(|arm| (marginals.visits(arm), marginals.availability(arm)))
+        .map(|arm| (marginals.visits(arm), marginals.times_available(arm)))
 }
 
 /// A node promoted by `reuse_joint` carries the arms of every determinization
 /// that reached it at depth, and the position it is now the root of need not
-/// offer them all. Arming the fast path on iteration 1 restamps those leftovers
+/// offer them all. Skipping enumeration from iteration 1 marks those leftovers
 /// as available, and from iteration 2 the search selects and applies an action
-/// the player does not have — in debug tripping the fast path's own consistency
+/// the player does not have — in debug tripping the skip's own consistency
 /// check, which then blames the game for a claim the game made correctly.
 ///
 /// Arming it only once a full pass has *proved* the sets equal costs a promoted
-/// root the fast path it cannot have, and leaves the withheld arm exactly where
+/// root the skip it cannot have, and leaves the withheld arm exactly where
 /// promotion left it: never available, so never selected.
 #[test]
 fn a_promoted_simultaneous_root_never_offers_an_arm_the_position_withholds() {
@@ -283,9 +282,9 @@ fn a_promoted_simultaneous_root_never_offers_an_arm_the_position_withholds() {
     assert_eq!(
         arm(searcher.tree().expect("a search leaves a tree"), 0, EDGE),
         Some(promoted),
-        "the withheld arm was {promoted:?} (visits, availability) when the search \
-         started and it moved, so the root was marked fully expanded on a pass that \
-         never proved the tree's arms are the position's"
+        "the withheld arm was {promoted:?} (visits, times_available) when the search \
+         started and it moved, so the root's arms were taken to match its choices on a \
+         pass that never proved it"
     );
     assert!(
         before.0 <= promoted.0,
@@ -293,7 +292,7 @@ fn a_promoted_simultaneous_root_never_offers_an_arm_the_position_withholds() {
     );
 }
 
-/// The sequential twin of the test above. A leftover child that the fast path
+/// The sequential twin of the test above. A leftover child that the skip
 /// keeps marking available is selected and applied during the descent, so the
 /// search spends its budget in a world it cannot play — and before the root's
 /// answer was filtered against the position, that child could win the search
@@ -354,17 +353,207 @@ fn a_re_rooted_sequential_root_never_offers_a_child_the_position_withholds() {
     assert_eq!(
         after, before,
         "the withheld child had {before} visits when the search started and has {after} \
-         now, so the fast path kept marking it available"
+         now, so the skip kept marking it available"
     );
+}
+
+/// `G` claiming [`ChoicesOnRevisit::SameEverywhere`], so one fixture can be
+/// searched under two claims with nothing else different.
+#[derive(Clone, Default)]
+struct ClaimsSameEverywhere<G>(G);
+
+impl<G: Game> Game for ClaimsSameEverywhere<G> {
+    type Choice = G::Choice;
+    type Rewards = G::Rewards;
+    type Context = G::Context;
+    type Side = G::Side;
+
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameEverywhere;
+
+    fn status(&self, ctx: &G::Context) -> Status<G::Rewards> {
+        self.0.status(ctx)
+    }
+
+    fn choices_into(&self, ctx: &G::Context, out: &mut Vec<G::Choice>) {
+        self.0.choices_into(ctx, out)
+    }
+
+    fn choices_for_into(&self, ctx: &G::Context, player: u8, out: &mut Vec<G::Choice>) {
+        self.0.choices_for_into(ctx, player, out)
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, ctx: &G::Context, choice: &G::Choice, rng: &mut R) {
+        self.0.apply_choice(ctx, choice, rng)
+    }
+
+    fn apply_joint<R: Rng + ?Sized>(
+        &mut self,
+        ctx: &G::Context,
+        joint: JointChoices<'_, G::Choice>,
+        rng: &mut R,
+    ) {
+        self.0.apply_joint(ctx, joint, rng)
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, ctx: &G::Context, rng: &mut R) -> G::Rewards {
+        self.0.rollout(ctx, rng)
+    }
+
+    fn new_buffer(&self) -> Self {
+        Self(self.0.new_buffer())
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(
+        &self,
+        dest: &mut Self,
+        ctx: &G::Context,
+        perspective: u8,
+        rng: &mut R,
+    ) {
+        self.0.determinize_into(&mut dest.0, ctx, perspective, rng)
+    }
+}
+
+/// Six plies of three choices with nothing hidden and nothing drawn, whose
+/// context counts every enumeration the search asks for.
+#[derive(Clone, Default)]
+struct CountedTree {
+    path: u64,
+    ply: u8,
+}
+
+impl CountedTree {
+    const PLIES: u8 = 6;
+
+    fn payoff(&self) -> f64 {
+        (self.path.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as f64 / 255.0
+    }
+}
+
+impl Game for CountedTree {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = Cell<u64>;
+    type Side = ();
+
+    fn status(&self, _: &Cell<u64>) -> Status<[f64; 2]> {
+        if self.ply >= Self::PLIES {
+            let payoff = self.payoff();
+            Status::Terminal([payoff, 1.0 - payoff])
+        } else {
+            Status::Active {
+                player: self.ply % 2,
+            }
+        }
+    }
+
+    fn choices_into(&self, enumerations: &Cell<u64>, out: &mut Vec<u8>) {
+        enumerations.set(enumerations.get() + 1);
+        out.extend(0..3);
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &Cell<u64>, choice: &u8, _: &mut R) {
+        self.path = self.path * 3 + u64::from(*choice);
+        self.ply += 1;
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, enumerations: &Cell<u64>, rng: &mut R) -> [f64; 2] {
+        while self.ply < Self::PLIES {
+            let choice = below(rng, 3) as u8;
+            self.apply_choice(enumerations, &choice, rng);
+        }
+        let payoff = self.payoff();
+        [payoff, 1.0 - payoff]
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &Cell<u64>, _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}
+
+/// How many times a search of `iterations` on `game`, and then a second search
+/// re-rooted one move down, asked for choices.
+fn enumerations_over_two_searches<G>(game: G, iterations: u32) -> (u64, u64)
+where
+    G: Game<Choice = u8, Context = Cell<u64>> + Clone,
+{
+    let enumerations = Cell::new(0);
+    let mut rng = rng(1);
+    let mut searcher = Searcher::new(&game);
+    let first = searcher.search(&game, &enumerations, 0, &config(iterations), None, &mut rng);
+    let after_first = enumerations.replace(0);
+
+    let mut real = game.clone();
+    real.apply_choice(&enumerations, &first.choice, &mut rng);
+    enumerations.set(0);
+    assert!(searcher.reuse_subtree(&first.choice), "a root child");
+    searcher.search(&real, &enumerations, 1, &config(iterations), None, &mut rng);
+    (after_first, enumerations.get())
+}
+
+/// Once a node's children match its choices, `SameEverywhere` never asks for
+/// them again, so the only node a descent enumerates is the one it is still
+/// expanding: the count is bounded by the iterations, where `MayChange` pays at
+/// every level. The bound holds across `reuse_subtree` too, which forgets only
+/// what was proved about the new root. A few enumerations are the search's own,
+/// outside the descent: the forced-move check and the root legality mask.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "debug builds re-enumerate every node they skip, to check the claim"
+)]
+fn same_everywhere_enumerates_at_most_once_per_iteration() {
+    const ITERATIONS: u32 = 2_000;
+    const OUTSIDE_THE_DESCENT: u64 = 3;
+
+    let (may_change_first, may_change_second) =
+        enumerations_over_two_searches(CountedTree::default(), ITERATIONS);
+    let (first, second) =
+        enumerations_over_two_searches(ClaimsSameEverywhere(CountedTree::default()), ITERATIONS);
+
+    assert!(
+        may_change_first > 2 * u64::from(ITERATIONS),
+        "sanity: `MayChange` enumerated {may_change_first} times in {ITERATIONS} iterations, \
+         which is too shallow a tree for the bound below to mean anything"
+    );
+    assert!(
+        may_change_second > 2 * u64::from(ITERATIONS),
+        "sanity: the re-rooted `MayChange` search enumerated only {may_change_second} times"
+    );
+    for (search, count) in [("first", first), ("re-rooted", second)] {
+        assert!(
+            count <= u64::from(ITERATIONS) + OUTSIDE_THE_DESCENT,
+            "the {search} `SameEverywhere` search enumerated {count} times in {ITERATIONS} \
+             iterations, so some node whose children already matched its choices was \
+             enumerated again"
+        );
+    }
+}
+
+/// `ChanceLine` draws whether [`EDGE`] is legal at its second ply, so claiming
+/// `SameEverywhere` for it is false, and a debug build is what catches that:
+/// it re-enumerates every node the claim lets it skip.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "CHOICES_ON_REVISIT is SameEverywhere")]
+fn a_false_same_everywhere_claim_panics_in_debug() {
+    let game = ClaimsSameEverywhere(ChanceLine::default());
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &(), 0, &config(2_000), None, &mut rng(2));
 }
 
 /// Two plies of [`WideLine::WIDTH`] choices, where [`WideLine::BEST`] pays best
 /// at the second and the low third of the rest pay nearly as well, so the
 /// answer is contested rather than obvious.
 ///
-/// Determinization is a clone, so `ROOT_CHOICES_INVARIANT` is a true claim at
-/// both roots and the fast path is reached in both searches. Nothing here is
-/// about legality: the point is what the fast path does to the counts.
+/// Determinization is a clone and nothing is drawn by chance, so every
+/// [`ChoicesOnRevisit`] claim is true here and the skip is reached in both
+/// searches under either. Nothing here is about legality: the point is what the
+/// skip does to the counts.
 #[derive(Clone, Default)]
 struct WideLine {
     first: Option<u8>,
@@ -392,7 +581,7 @@ impl Game for WideLine {
     type Context = ();
     type Side = ();
 
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameAtRoot;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         match (self.first, self.second) {
@@ -438,15 +627,15 @@ impl Game for WideLine {
     }
 }
 
-/// The fast path skips expansion outright, and expansion is where a root child
+/// The skip passes over expansion outright, and expansion is where a root child
 /// is credited with the iteration that offered it. A re-rooted root reaches the
-/// fast path on its second iteration — `reuse_subtree` clears the flag, so
-/// iteration 1 runs a full pass and writes the availabilities progressive
-/// expansion left at the node that is now the root, which are not uniform — and
-/// from then on visits climb while those numbers stand still.
+/// skip on its second iteration — re-rooting forgets what was proved, so
+/// iteration 1 runs a full pass and writes the `times_available` counts
+/// progressive expansion left at the node that is now the root, which are not
+/// uniform — and from then on visits climb while those numbers stand still.
 ///
 /// What this pins is the count itself: every iteration of a search under the
-/// invariant is an opportunity for every root child, so no child can end with
+/// claim is an opportunity for every root child, so no child can end with
 /// fewer opportunities than the search ran iterations, and none can hold more
 /// selections than opportunities. Both are read straight off the tree, because
 /// the consequences downstream are not things a test can hold still: the root
@@ -456,10 +645,18 @@ impl Game for WideLine {
 /// observed, which is the honest way for this to fail and not the failure this
 /// test is describing.
 #[test]
-fn a_re_rooted_root_counts_the_opportunities_the_fast_path_skips() {
+fn a_re_rooted_root_counts_the_opportunities_it_skips_enumerating() {
+    counts_every_opportunity_it_skips(WideLine::default());
+    counts_every_opportunity_it_skips(ClaimsSameEverywhere(WideLine::default()));
+}
+
+fn counts_every_opportunity_it_skips<G>(game: G)
+where
+    G: Game<Choice = u8, Context = ()> + Clone,
+{
+    let claim = G::CHOICES_ON_REVISIT;
     for seed in 0..8u64 {
         let mut rng = rng(seed);
-        let game = WideLine::default();
         let mut searcher = Searcher::new(&game);
         let first = searcher.search(&game, &(), 0, &config(120), None, &mut rng);
 
@@ -470,8 +667,8 @@ fn a_re_rooted_root_counts_the_opportunities_the_fast_path_skips() {
         let second = searcher.search(&real, &(), 0, &config(1_200), None, &mut rng);
         assert!(
             second.reused_iterations * 8 < second.iterations_used,
-            "seed {seed}: the promoted node arrived with {} visits against {} more to \
-             come, which is not lopsided enough for a frozen denominator to show",
+            "{claim:?} seed {seed}: the promoted node arrived with {} visits against {} \
+             more to come, which is not lopsided enough for a frozen denominator to show",
             second.reused_iterations,
             second.iterations_used
         );
@@ -479,24 +676,24 @@ fn a_re_rooted_root_counts_the_opportunities_the_fast_path_skips() {
         for child in root.children() {
             let choice = child.edge().choice().expect("a sequential root's child");
             assert!(
-                child.availability() >= second.iterations_used,
-                "seed {seed}: child {choice} was offered {} times by a search that ran \
-                 {} iterations, every one of which offered every child",
-                child.availability(),
+                child.times_available() >= second.iterations_used,
+                "{claim:?} seed {seed}: child {choice} was offered {} times by a search \
+                 that ran {} iterations, every one of which offered every child",
+                child.times_available(),
                 second.iterations_used
             );
             assert!(
-                child.visits() <= child.availability(),
-                "seed {seed}: child {choice} holds {} selections against {} \
+                child.visits() <= child.times_available(),
+                "{claim:?} seed {seed}: child {choice} holds {} selections against {} \
                  opportunities to make them",
                 child.visits(),
-                child.availability()
+                child.times_available()
             );
         }
         assert_eq!(
             second.choice,
             WideLine::BEST,
-            "seed {seed}: answered {} (worth {}) where {} pays {}",
+            "{claim:?} seed {seed}: answered {} (worth {}) where {} pays {}",
             second.choice,
             WideLine::payoff(second.choice),
             WideLine::BEST,
@@ -511,7 +708,7 @@ fn a_re_rooted_root_counts_the_opportunities_the_fast_path_skips() {
 /// fixture that has to lie about anything else.
 ///
 /// The widths narrow so that a root left over from the previous ply holds more
-/// children than the position has choices, which is what the fast path's own
+/// children than the position has choices, which is what the skip's own
 /// consistency check measures.
 #[derive(Clone, Default)]
 struct FusedLine {
@@ -534,7 +731,7 @@ impl Game for FusedLine {
     type Context = Cell<u32>;
     type Side = ();
 
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameAtRoot;
 
     fn status(&self, fuse: &Cell<u32>) -> Status<[f64; 2]> {
         let left = fuse.get();
@@ -569,13 +766,13 @@ impl Game for FusedLine {
     }
 }
 
-/// `root_fully_expanded` describes the root the search armed it for, and lives
-/// in the scratch that outlives it. A search that unwinds after arming it used
-/// to leave both the flag and the tree in place, so the *next* search — at a
-/// different position, with no reuse asked for — took the fast path against a
-/// root it never expanded: in release, `apply_choice` calls with choices the
-/// state does not offer; in debug, the fast path's own assertion, blaming a
-/// game that declared the invariant correctly.
+/// What a search proved about its root's choices belongs to that root. When
+/// the proof lived in scratch that outlived the tree, a search that unwound
+/// after making it left the proof in place, so the *next* search — at a
+/// different position, with no reuse asked for — skipped enumerating a root it
+/// never expanded: in release, `apply_choice` calls with choices the state does
+/// not offer; in debug, the skip's own assertion, blaming a game that declared
+/// its choices correctly. The proof now lives on the node it is about.
 #[test]
 fn an_abandoned_search_does_not_leave_the_next_root_marked_expanded() {
     let fuse = Cell::new(u32::MAX);

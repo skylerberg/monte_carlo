@@ -121,7 +121,7 @@ pub(crate) fn settled<G: Game>(
                 .map(|(i, (arm, _))| {
                     (
                         i,
-                        Candidate::new(arm.visits, arm.availability, arm.cumulative_reward),
+                        Candidate::new(arm.visits, arm.times_available, arm.cumulative_reward),
                     )
                 }),
             remaining,
@@ -141,7 +141,7 @@ pub(crate) fn settled<G: Game>(
             .map(|(i, (child, _))| {
                 (
                     i,
-                    Candidate::new(child.visits, child.availability, child.cumulative_reward),
+                    Candidate::new(child.visits, child.times_available, child.cumulative_reward),
                 )
             }),
         remaining,
@@ -180,6 +180,7 @@ mod tests {
     use super::*;
     use crate::game::Status;
     use crate::node::Node;
+    use crate::select::ExplorationCount;
     use rand_core::{Rng, SeedableRng};
     use wyrand::WyRand;
 
@@ -210,7 +211,7 @@ mod tests {
         fn determinize_into<R: Rng + ?Sized>(&self, _: &mut Self, _: &(), _: u8, _: &mut R) {}
     }
 
-    /// A root of three children carrying `(visits, availability, mean)`, and the
+    /// A root of three children carrying `(visits, times_available, mean)`, and the
     /// visits they add up to.
     fn root(children: [(u32, u32, f64); 3]) -> Node<u8> {
         let mut root = Node::new_root(0);
@@ -219,13 +220,14 @@ mod tests {
             &[0, 1, 2],
             0,
             usize::MAX,
+            ExplorationCount::ParentVisits,
             &mut avail,
             &mut WyRand::seed_from_u64(1),
         );
-        for (choice, &(visits, availability, mean)) in children.iter().enumerate() {
+        for (choice, &(visits, times_available, mean)) in children.iter().enumerate() {
             let child = &mut root.children[choice];
             child.visits = visits;
-            child.availability = availability;
+            child.times_available = times_available;
             child.cumulative_reward = visits as f64 * mean;
             root.visits += visits;
         }

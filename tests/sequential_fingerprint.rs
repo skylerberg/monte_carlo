@@ -17,7 +17,7 @@
 //!
 //! Regenerated a second time, for the root extraction fix. A root now ranks its
 //! children by **mean reward** among the children it selected at least
-//! `rank::MIN_EVIDENCE` times, with the selection rate `visits / availability`
+//! `rank::MIN_EVIDENCE` times, with the selection rate `visits / times_available`
 //! breaking ties, and a child under that bar never outranks one over it. The
 //! early-termination proof is stated against the same ranking, and a mean is not
 //! made of counts, so all that survives of it is the bar: a rival that cannot
