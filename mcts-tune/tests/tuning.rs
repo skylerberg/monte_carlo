@@ -10,7 +10,7 @@
 use std::hash::Hash;
 
 use mcts::rand_core::Rng;
-use mcts::{Config, Game, Status};
+use mcts::{ChoicesOnRevisit, Config, Game, Status};
 use mcts_tune::{
     evaluate, play, Checkpoint, CmaEs, CmaParams, Evaluation, Ga, GaParams, Match, Opponents,
     Optimizer, ResumeError, Tunable, TuneConfig,
@@ -86,7 +86,7 @@ impl Game for Draft {
     type Context = Beliefs;
     type Side = ();
 
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameAtRoot;
 
     fn status(&self, _ctx: &Beliefs) -> Status<[f64; 2]> {
         if self.remaining > 0 {

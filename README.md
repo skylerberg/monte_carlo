@@ -31,6 +31,11 @@ game; run it with `cargo run --example tic_tac_toe`.
   than how often its parent was visited, so a rarely-legal move is not mistaken
   for an under-explored one. The root is the textbook `ln(parent visits)`,
   deliberately; its own ranking is what divides by availability there.
+* **A fast path for perfect information** — declare
+  `Game::CHOICES_ON_REVISIT = ChoicesOnRevisit::SameEverywhere` and a node stops
+  asking the game for its choices once it holds a child for each, and is
+  explored by textbook UCT. Debug builds check the claim on every node it lets
+  the search skip.
 * **max^n backup** over per-player reward vectors. Any number of players, any
   reward scale; nothing assumes two players or zero sum.
 * **Simultaneous moves** — one bandit per participant over that player's own

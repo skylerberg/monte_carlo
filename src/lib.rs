@@ -76,6 +76,10 @@
 //!   *available* rather than how often its parent was visited. The root scores
 //!   its children against its own visit count instead — see the comment in
 //!   `src/select.rs` for why that one level is deliberately the textbook rule.
+//! * **A fast path for games whose choices never change.** Declare
+//!   [`ChoicesOnRevisit::SameEverywhere`] and a node is enumerated until its
+//!   children match its choices and never again, which for a deterministic
+//!   perfect-information game is most of what the ISMCTS bookkeeping costs.
 //! * **max^n backup** over per-player reward vectors, so any number of players
 //!   and any reward scale work without a zero-sum assumption.
 //! * **Simultaneous moves** via decoupled UCT, with regret matching as the
@@ -117,7 +121,10 @@ mod parallel;
 /// crate's `Rng` bounds refer to.
 pub use rand_core;
 
-pub use game::{Game, JointChoices, PlayerSet, PlayerSetIter, Rewards, SimultaneousPolicy, Status};
+pub use game::{
+    ChoicesOnRevisit, Game, JointChoices, PlayerSet, PlayerSetIter, Rewards, SimultaneousPolicy,
+    Status,
+};
 pub use node::{Edge, Marginals, Node, NodeKind};
 pub use search::{Config, RootPolicy, SearchResult, Searcher, SimultaneousConfig, StopReason};
 

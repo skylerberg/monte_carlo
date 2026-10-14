@@ -1,10 +1,41 @@
+use crate::game::Game;
 use crate::node::Node;
+
+/// The count a child's exploration term is measured against.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ExplorationCount {
+    ParentVisits,
+    TimesAvailable,
+}
+
+impl ExplorationCount {
+    /// Textbook UCB1 at the root and wherever choices never change, the ISMCTS
+    /// availability rule everywhere else.
+    ///
+    /// The root's exception is deliberate and is not a place to "restore"
+    /// consistency: nothing maintains `ln_times_available` on a root child,
+    /// since that would be a libm call per child per iteration on the widest
+    /// loop in the search, and `reroot_at` resets the field on promotion, so
+    /// reading it there would score the root against a stale zero. The
+    /// correction the root does need is in `rank`, which ranks the answer on a
+    /// mean and breaks ties on visits over `times_available`; the exploration
+    /// term is what apportions the budget between children the root offers on
+    /// every iteration anyway.
+    #[inline(always)]
+    pub(crate) fn at<G: Game>(node: &Node<G::Choice>) -> Self {
+        if node.is_root() || G::CHOICES_ON_REVISIT.are_same_at(node) {
+            Self::ParentVisits
+        } else {
+            Self::TimesAvailable
+        }
+    }
+}
 
 /// UCB1 with an optional progressive-bias prior.
 ///
-/// `ln_total` is the parent's visit count at the root, and the child's own
-/// availability count elsewhere — the Information Set MCTS variant, which stops
-/// a rarely-legal choice from looking under-explored.
+/// `ln_total` is the log of whichever [`ExplorationCount`] the node uses. The
+/// Information Set MCTS variant, a child's own `times_available`, stops a
+/// rarely-legal choice from looking under-explored.
 ///
 /// Kept as one function so that its callers can never disagree about the
 /// formula. There are two: `select`, and `duct::select_duct`, which scores a
@@ -47,26 +78,15 @@ pub(crate) fn ucb<C>(child: &Node<C>, ln_total: f64, exploration: f64, bias_weig
 pub(crate) fn select<C>(
     node: &Node<C>,
     avail: &[bool],
+    exploration_count: ExplorationCount,
     exploration: f64,
     bias_weight: f64,
 ) -> Option<usize> {
     debug_assert_eq!(avail.len(), node.children.len());
 
-    // Textbook UCB1 at the root, the ISMCTS availability rule below it. The
-    // asymmetry is deliberate and is not a place to "restore" consistency:
-    // nothing maintains `ln_times_available` on a root child — `Node::expand` and
-    // the `ROOT_CHOICES_INVARIANT` fast path both skip the `ln` there rather
-    // than pay a libm call per child per iteration on the widest loop in the
-    // search, and `reroot_at` resets the field on promotion — so reading it
-    // here would score the root against a stale zero. The correction the root
-    // does need is in `rank`, which ranks the answer on a mean and breaks ties
-    // on visits over availability; the exploration term is what apportions the
-    // budget between children the root offers on every iteration anyway.
-    let is_root = node.is_root();
-    let root_ln = if is_root {
-        (node.visits as f64).ln()
-    } else {
-        0.0
+    let ln_parent_visits = match exploration_count {
+        ExplorationCount::ParentVisits => (node.visits as f64).ln(),
+        ExplorationCount::TimesAvailable => 0.0,
     };
 
     let mut best = None;
@@ -79,10 +99,9 @@ pub(crate) fn select<C>(
         if child.visits == 0 {
             return Some(i);
         }
-        let ln_total = if is_root {
-            root_ln
-        } else {
-            child.ln_times_available
+        let ln_total = match exploration_count {
+            ExplorationCount::ParentVisits => ln_parent_visits,
+            ExplorationCount::TimesAvailable => child.ln_times_available,
         };
         let value = ucb(child, ln_total, exploration, bias_weight);
         if value > best_value {

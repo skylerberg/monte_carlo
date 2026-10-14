@@ -2,14 +2,16 @@
 //!
 //! Tic-tac-toe is perfect information and deterministic, so the hooks for
 //! hidden information and side models stay at their defaults: `Context` and
-//! `Side` are `()`, and `determinize_into` is a plain copy.
+//! `Side` are `()`, and `determinize_into` is a plain copy. For the same reason
+//! a position's choices are the same every time the search reaches it, and
+//! `CHOICES_ON_REVISIT` says so.
 //!
 //! Run with `cargo run --example tic_tac_toe`. `--release` plays the same game
 //! faster; the dev profile is what CI runs, since that is where an arithmetic
 //! overflow in a game is reported rather than wrapped.
 
 use mcts::rand_core::{Rng, SeedableRng};
-use mcts::{Config, Game, Searcher, Status, StopReason};
+use mcts::{ChoicesOnRevisit, Config, Game, Searcher, Status, StopReason};
 use wyrand::WyRand;
 
 const LINES: [[usize; 3]; 8] = [
@@ -59,6 +61,8 @@ impl Game for TicTacToe {
     type Rewards = [f64; 2];
     type Context = ();
     type Side = ();
+
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameEverywhere;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if let Some(winner) = self.winner() {

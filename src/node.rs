@@ -5,6 +5,7 @@ use hashbrown::HashTable;
 use rand_core::Rng;
 
 use crate::game::{PlayerSet, SimultaneousPolicy};
+use crate::select::ExplorationCount;
 use crate::util::{below, hash_of};
 
 /// A node in the search tree.
@@ -29,7 +30,7 @@ pub struct Node<C> {
     pub(crate) heuristic_bias: f32,
     /// The player whose reward `cumulative_reward` accumulates.
     pub(crate) player: u8,
-    pub(crate) kind: NodeKind,
+    pub(crate) kind_and_match: KindAndMatch,
     /// `Some` only when `kind == NodeKind::Choice`.
     pub(crate) choice: Option<C>,
 }
@@ -53,6 +54,45 @@ pub enum NodeKind {
     /// is `None`; the marginal indices live in the parent — see
     /// [`Node::joint_arm`].
     Joint = 2,
+}
+
+/// A node's [`NodeKind`], and whether its children — or, at a simultaneous
+/// node, its arms — are exactly the choices it was last enumerated with.
+///
+/// One byte for both because `Node<u8>` fills 64 bytes with no padding to
+/// spare, and a separate `bool` would put every node of such a tree across two
+/// cache lines.
+#[derive(Clone, Copy)]
+pub(crate) struct KindAndMatch(u8);
+
+impl KindAndMatch {
+    const KIND_BITS: u8 = 0b11;
+    const MATCH_BIT: u8 = 0b100;
+
+    fn new(kind: NodeKind) -> Self {
+        Self(kind as u8)
+    }
+
+    #[inline(always)]
+    fn kind(self) -> NodeKind {
+        const ROOT: u8 = NodeKind::Root as u8;
+        const CHOICE: u8 = NodeKind::Choice as u8;
+        match self.0 & Self::KIND_BITS {
+            ROOT => NodeKind::Root,
+            CHOICE => NodeKind::Choice,
+            _ => NodeKind::Joint,
+        }
+    }
+
+    #[inline(always)]
+    fn edges_match_choices(self) -> bool {
+        self.0 & Self::MATCH_BIT != 0
+    }
+
+    fn with_edges_match_choices(self, matched: bool) -> Self {
+        let match_bit = if matched { Self::MATCH_BIT } else { 0 };
+        Self(self.0 & Self::KIND_BITS | match_bit)
+    }
 }
 
 /// What leads to a [`Node`]: the incoming edge, with whatever it carries.
@@ -380,14 +420,38 @@ impl<C> Node<C> {
             times_available: 1,
             heuristic_bias: 0.0,
             player,
-            kind,
+            kind_and_match: KindAndMatch::new(kind),
             choice,
         }
     }
 
     #[inline(always)]
     pub(crate) fn is_root(&self) -> bool {
-        matches!(self.kind, NodeKind::Root)
+        matches!(self.kind(), NodeKind::Root)
+    }
+
+    #[inline(always)]
+    pub(crate) fn children_match_choices(&self) -> bool {
+        self.kind_and_match.edges_match_choices()
+    }
+
+    #[inline(always)]
+    pub(crate) fn arms_match_choices(&self) -> bool {
+        self.kind_and_match.edges_match_choices()
+    }
+
+    pub(crate) fn set_arms_match_choices(&mut self, matched: bool) {
+        self.kind_and_match = self.kind_and_match.with_edges_match_choices(matched);
+    }
+
+    /// Turn this node into the root of its own tree, clearing what was proved
+    /// about its choices: that proof was about a position the caller has now
+    /// moved on from.
+    fn become_root(&mut self) {
+        self.kind_and_match = KindAndMatch::new(NodeKind::Root);
+        self.choice = None;
+        self.times_available = 1;
+        self.ln_times_available = 0.0;
     }
 
     /// Times this node was visited.
@@ -433,7 +497,7 @@ impl<C> Node<C> {
     /// choice. Use [`Edge::choice`] only where you already know which kind you
     /// hold.
     pub fn edge(&self) -> Edge<'_, C> {
-        match self.kind {
+        match self.kind() {
             NodeKind::Root => Edge::Root,
             NodeKind::Joint => Edge::Joint,
             NodeKind::Choice => Edge::Choice(
@@ -465,7 +529,7 @@ impl<C> Node<C> {
 
     /// Which of the three things this node is.
     pub fn kind(&self) -> NodeKind {
-        self.kind
+        self.kind_and_match.kind()
     }
 
     /// The player whose reward [`Node::cumulative_reward`] accumulates.
@@ -578,20 +642,15 @@ impl<C> Node<C> {
         }
     }
 
-    /// Bump every arm's availability without enumerating a single move.
-    ///
-    /// The `Game::ROOT_CHOICES_INVARIANT` fast path at a simultaneous root:
-    /// move generation is what the invariant saves, and the stamp is
-    /// `sum(|A_i|)` word writes, the same order as the sequential path's
-    /// `root_avail.resize` — which it would not be if it issued a libm call per
-    /// arm on top, so the cached logarithm is refreshed only for the policy
-    /// that reads it.
-    pub(crate) fn restamp_marginals(&mut self, policy: SimultaneousPolicy) {
+    /// What a full expansion pass would record at a node whose arms already
+    /// match its choices, without enumerating a single move: `sum(|A_i|)` word
+    /// writes, and a libm call per arm only for the policy that reads one.
+    pub(crate) fn mark_every_arm_available(&mut self, policy: SimultaneousPolicy) {
         let epoch = self.visits;
         let caches_ln = policy.reads_ln_times_available();
         let simul = self
             .simul_mut()
-            .expect("mcts: only a simultaneous node has marginals to restamp");
+            .expect("mcts: only a simultaneous node has arms");
         for arm in &mut simul.arm_stats {
             arm.times_available += 1;
             if caches_ln {
@@ -653,10 +712,7 @@ impl<C> Node<C> {
             return false;
         };
         let mut child = self.children.swap_remove(i);
-        child.kind = NodeKind::Root;
-        child.choice = None;
-        child.times_available = 1;
-        child.ln_times_available = 0.0;
+        child.become_root();
         *self = child;
         true
     }
@@ -752,7 +808,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
 
     /// Record this iteration's legal choices, and grow the tree by one child.
     ///
-    /// Every already-present child that is legal now has its availability count
+    /// Every already-present child that is legal now has its `times_available`
     /// bumped, and `avail[i]` is set for it. The root creates a child for every
     /// legal choice; other nodes create exactly one, reservoir-sampled uniformly
     /// from the choices they have not seen yet. Sampling rather than shuffling
@@ -763,6 +819,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
         choices: &[C],
         player: u8,
         threshold: usize,
+        exploration_count: ExplorationCount,
         avail: &mut Vec<bool>,
         rng: &mut R,
     ) {
@@ -776,27 +833,23 @@ impl<C: Clone + Eq + Hash> Node<C> {
 
         let mut unseen: u64 = 0;
         let mut sampled = usize::MAX;
+        let mut legal_children = 0;
 
         for (i, choice) in choices.iter().enumerate() {
             match self.find_child(choice) {
                 // A duplicate within `choices` must not be counted twice.
                 Some(k) if avail[k] => {}
                 Some(k) => {
+                    legal_children += 1;
                     let child = &mut self.children[k];
                     child.times_available += 1;
-                    // Only a non-root parent scores its children against their
-                    // own times_available: at a root `select` uses the root's
-                    // visit count, and `reroot_at` resets the field on the one
-                    // promotion that could make a root child read it again. So
-                    // a root child pays the increment, which the root ranking
-                    // divides by, and not the `ln` for a denominator nothing
-                    // reads.
-                    if !is_root {
+                    if exploration_count == ExplorationCount::TimesAvailable {
                         child.ln_times_available = (child.times_available as f64).ln();
                     }
                     avail[k] = true;
                 }
                 None if is_root => {
+                    legal_children += 1;
                     self.push_child(choice.clone(), player, threshold);
                     avail.push(true);
                 }
@@ -810,9 +863,16 @@ impl<C: Clone + Eq + Hash> Node<C> {
         }
 
         if !is_root && sampled != usize::MAX {
+            legal_children += 1;
             self.push_child(choices[sampled].clone(), player, threshold);
             avail.push(true);
         }
+
+        let every_choice_has_a_child = is_root || unseen <= 1;
+        let every_child_is_a_choice = legal_children == self.children.len();
+        self.kind_and_match = self
+            .kind_and_match
+            .with_edges_match_choices(every_choice_has_a_child && every_child_is_a_choice);
     }
 
     /// Record this iteration's legal actions for one participant, creating an
@@ -1115,10 +1175,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
             return false;
         };
         let mut child = self.children.swap_remove(i);
-        child.kind = NodeKind::Root;
-        child.choice = None;
-        child.times_available = 1;
-        child.ln_times_available = 0.0;
+        child.become_root();
         *self = child;
         true
     }
@@ -1470,10 +1527,10 @@ mod tests {
                 assert_eq!(arm.ln_times_available, expected);
             }
 
-            // The `ROOT_CHOICES_INVARIANT` fast path stamps the same arms
-            // without enumerating them, and has the same reason not to.
+            // A node whose arms already match its choices stamps the same
+            // arms without enumerating them, and has the same reason not to.
             node.record(0.0);
-            node.restamp_marginals(policy);
+            node.mark_every_arm_available(policy);
             let expected = if policy == DUCT { 3.0f64.ln() } else { 0.0 };
             for arm in &node.simul().unwrap().arm_stats {
                 assert_eq!(arm.times_available, 3);
@@ -1482,19 +1539,25 @@ mod tests {
         }
     }
 
-    /// `select` scores a root's children against the root's own visit count,
-    /// so a root child's `ln_times_available` has no reader — and a search at a
-    /// root that enumerates its choices every iteration would otherwise pay a
-    /// libm call for each of them.
+    /// A node whose children are explored against its own visits has no reader
+    /// for a child's `ln_times_available`, and a node that enumerates its
+    /// choices every visit would otherwise pay a libm call for each of them.
     #[test]
-    fn a_root_child_pays_no_ln_times_available() {
+    fn only_a_times_available_count_pays_for_its_logarithm() {
         let choices: Vec<u16> = (0..4).collect();
         let mut avail = Vec::new();
         let mut rng = WyRand::seed_from_u64(1);
 
         let mut root = Node::new_root(0);
         for _ in 0..2 {
-            root.expand(&choices, 0, usize::MAX, &mut avail, &mut rng);
+            root.expand(
+                &choices,
+                0,
+                usize::MAX,
+                ExplorationCount::ParentVisits,
+                &mut avail,
+                &mut rng,
+            );
         }
         assert_eq!(root.children.len(), choices.len());
         for child in &root.children {
@@ -1502,11 +1565,16 @@ mod tests {
             assert_eq!(child.ln_times_available, 0.0);
         }
 
-        // The same expansion under a non-root parent, where `select` does read
-        // the field, must still cache it.
         let mut inner = Node::new(0, NodeKind::Choice, Some(9u16));
         for _ in 0..5 {
-            inner.expand(&choices, 0, usize::MAX, &mut avail, &mut rng);
+            inner.expand(
+                &choices,
+                0,
+                usize::MAX,
+                ExplorationCount::TimesAvailable,
+                &mut avail,
+                &mut rng,
+            );
         }
         let opened = &inner.children[0];
         assert!(opened.times_available > 1);

@@ -18,8 +18,8 @@ mod common;
 use common::*;
 use mcts::rand_core::{Rng, SeedableRng};
 use mcts::{
-    Config, Edge, Game, JointChoices, NodeKind, PlayerSet, RootPolicy, SearchResult, Searcher,
-    SimultaneousConfig, SimultaneousPolicy, Status, StopReason,
+    ChoicesOnRevisit, Config, Edge, Game, JointChoices, NodeKind, PlayerSet, RootPolicy,
+    SearchResult, Searcher, SimultaneousConfig, SimultaneousPolicy, Status, StopReason,
 };
 use wyrand::WyRand;
 
@@ -119,7 +119,7 @@ impl<G: Game> Game for Ducted<G> {
     type Context = G::Context;
     type Side = G::Side;
 
-    const ROOT_CHOICES_INVARIANT: bool = G::ROOT_CHOICES_INVARIANT;
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = G::CHOICES_ON_REVISIT;
     const CHILD_INDEX_THRESHOLD: usize = G::CHILD_INDEX_THRESHOLD;
     const SIMULTANEOUS_POLICY: SimultaneousPolicy = SimultaneousPolicy::Duct;
 

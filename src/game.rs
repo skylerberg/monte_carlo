@@ -2,6 +2,8 @@ use core::hash::Hash;
 
 use rand_core::Rng;
 
+use crate::node::Node;
+
 /// Per-player payoffs, produced once per iteration at the leaf.
 ///
 /// Implemented for `[f64; N]`, which is what both known consumers use. Backup is
@@ -325,12 +327,61 @@ impl<C> core::ops::Index<usize> for JointChoices<'_, C> {
     }
 }
 
+/// What the search may assume about a node's legal choices when it reaches
+/// that node again.
+///
+/// Wherever the choices are the same, a node that already holds exactly its
+/// choices is never enumerated again: move generation runs once per node rather
+/// than once per visit. Claiming more than is true gets you a wrong move rather
+/// than a slow search, since the search goes on selecting from a set the
+/// position no longer offers. Debug builds re-enumerate everywhere the claim
+/// lets the search skip, and panic on a mismatch, so run your integration tests
+/// in debug before trusting a claim in release.
+///
+/// An associated const on [`Game`] rather than a `Config` field, like
+/// [`SimultaneousPolicy`]: it is a fact about the game, and a const folds the
+/// branch it does not take out of the descent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ChoicesOnRevisit {
+    /// Nothing is assumed, and every visit enumerates. The only sound setting
+    /// when hidden state or chance decides what is legal below the root.
+    #[default]
+    MayChange,
+    /// The searching player's own choices at the root never depend on what a
+    /// determinization hides; at a simultaneous root, every participant's.
+    ///
+    /// Tempting to assume, since determinization only reshuffles what that
+    /// player cannot see, and easy to get wrong: turn it on with evidence.
+    SameAtRoot,
+    /// No node's choices ever change, because hidden state and chance never
+    /// decide what is legal. Every deterministic perfect-information game
+    /// qualifies.
+    ///
+    /// Below the root, selection then measures exploration against the
+    /// parent's visits, which is textbook UCT, instead of each child's
+    /// `times_available`: when every choice is available on every visit, the
+    /// two counts differ only by when the child was created.
+    SameEverywhere,
+}
+
+impl ChoicesOnRevisit {
+    #[inline(always)]
+    pub(crate) fn are_same_at<C>(self, node: &Node<C>) -> bool {
+        match self {
+            Self::MayChange => false,
+            Self::SameAtRoot => node.is_root(),
+            Self::SameEverywhere => true,
+        }
+    }
+}
+
 /// Which bandit each player runs over their own actions at a simultaneous node.
 ///
 /// Sequential nodes are always UCB1; this never touches them. It is an
 /// associated const on [`Game`] rather than a `Config` field because which
 /// equilibria a game has is a property of the game, like
-/// [`Game::ROOT_CHOICES_INVARIANT`] — and because a const folds the whole
+/// [`Game::CHOICES_ON_REVISIT`] — and because a const folds the whole
 /// unchosen branch away.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -425,25 +476,9 @@ pub trait Game: Sized {
     /// flat bandit over decisions the tree does not model. Use `()` if unused.
     type Side: Default;
 
-    /// Set only when the root's legal choices provably do not vary across
-    /// determinizations. Then the root is enumerated once per search instead of
-    /// once per iteration.
-    ///
-    /// **Off by default, and turn it on only with evidence.** It is tempting to
-    /// reason that determinization reshuffles only what is hidden from the
-    /// searching player, so their own options cannot change — that argument is
-    /// easy to make and hard to make correctly. When it is wrong, the search
-    /// selects a choice that is illegal in the current determinization, and
-    /// what you get is a wrong move rather than a slow search.
-    ///
-    /// Debug builds verify the claim on every iteration and panic if it breaks,
-    /// so run your integration tests in debug before trusting it in release.
-    ///
-    /// At a simultaneous root this is restated per participant: for every
-    /// player acting there, that player's own marginal set does not vary across
-    /// determinizations. It says nothing about joint successors, which are
-    /// created only as they are visited and are never "fully expanded".
-    const ROOT_CHOICES_INVARIANT: bool = false;
+    /// Where a node's legal choices are the same on every visit, which is
+    /// where the search may stop asking for them. See [`ChoicesOnRevisit`].
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::MayChange;
 
     /// Child count above which a node builds a hash index for lookup.
     ///

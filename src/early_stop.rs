@@ -180,6 +180,7 @@ mod tests {
     use super::*;
     use crate::game::Status;
     use crate::node::Node;
+    use crate::select::ExplorationCount;
     use rand_core::{Rng, SeedableRng};
     use wyrand::WyRand;
 
@@ -219,6 +220,7 @@ mod tests {
             &[0, 1, 2],
             0,
             usize::MAX,
+            ExplorationCount::ParentVisits,
             &mut avail,
             &mut WyRand::seed_from_u64(1),
         );

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+* **Breaking: `Game::ROOT_CHOICES_INVARIANT` is now `Game::CHOICES_ON_REVISIT`,
+  a `ChoicesOnRevisit` rather than a `bool`.** `false` is `MayChange`, the
+  default; `true` is `SameAtRoot`; `SameEverywhere` is new, above. One ordered
+  claim replaces what would otherwise have been two flags, one implying the
+  other, with a meaningless fourth combination. What the search proved about a
+  node's choices now lives on the node rather than in a scratch flag that
+  outlived the tree it described, so re-rooting forgets it by construction and
+  `Node<u8>` is still 64 bytes. Entries below this one use the old name.
+* **Breaking: `availability` is now `times_available`**, on `Node` and on
+  `Marginals`, since the count is how many iterations offered a choice. Prose
+  that names the ISMCTS concept still says "availability", and entries below
+  this one use the old method names.
 * **A root's answer is its best-valued candidate, not its most-visited one.** A
   choice is selectable only on the iterations in which it was legal, so
   `visits <= availability` is a hard cap and an argmax over raw visits ranks by
@@ -311,7 +323,22 @@ byte-identical and node counts are bit-identical in every configuration.
 
 ### Added
 
-* **`Marginals::policy_masked_into`.** This player's strategy restricted to the
+* **`ChoicesOnRevisit::SameEverywhere`: a game whose choices never change is
+  enumerated once per node, not once per visit.** Information Set MCTS asks for
+  a node's legal choices on every visit, looks each one up among the node's
+  children, and refreshes a logarithm per child, because a determinization may
+  have changed what is legal. A deterministic perfect-information game pays all
+  of that for nothing. Claiming `SameEverywhere` lets a node whose children —
+  or arms — already match its choices skip the enumeration, and below the root
+  scores exploration against the parent's visits, which is textbook UCT: when
+  every choice is available on every visit, a child's `times_available` differs
+  from that only by when the child was created. On the new `revisit` bench, a
+  perfect-information game of 24 choices a ply, 50 000 iterations take 17.1 ms
+  against 29.2 ms under `SameAtRoot`. In a real board game it lifted search
+  throughput 1.6x, and over 2 000 self-play games at equal iterations it scored
+  1 001 to 999 against `SameAtRoot`. Debug builds re-enumerate every node the
+  claim lets them skip and panic on a mismatch.
+* **`Marginals::policy_masked_into`. This player's strategy restricted to the
   arms legal in the real position and normalized over them, with the mask
   supplied by the caller. `Searcher::root_policy_into` is the same extraction at
   a root, where the searcher can enumerate the mask itself; below a root this is

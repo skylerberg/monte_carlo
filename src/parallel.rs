@@ -531,7 +531,7 @@ fn sample_merged<R: Rng + ?Sized>(strategy: &[f64], rng: &mut R) -> Option<usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{JointChoices, PlayerSet, SimultaneousPolicy, Status};
+    use crate::game::{ChoicesOnRevisit, JointChoices, PlayerSet, SimultaneousPolicy, Status};
     use crate::search::SimultaneousConfig;
     use crate::util::below;
     use rand_core::SeedableRng;
@@ -801,7 +801,7 @@ mod tests {
         type Context = G::Context;
         type Side = G::Side;
 
-        const ROOT_CHOICES_INVARIANT: bool = G::ROOT_CHOICES_INVARIANT;
+        const CHOICES_ON_REVISIT: ChoicesOnRevisit = G::CHOICES_ON_REVISIT;
         const CHILD_INDEX_THRESHOLD: usize = G::CHILD_INDEX_THRESHOLD;
         const SIMULTANEOUS_POLICY: SimultaneousPolicy = SimultaneousPolicy::Duct;
 

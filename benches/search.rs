@@ -14,7 +14,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mcts::rand_core::{Rng, SeedableRng};
-use mcts::{Config, Game, Searcher, Status};
+use mcts::{ChoicesOnRevisit, Config, Game, Searcher, Status};
 use wyrand::WyRand;
 
 fn seeded() -> WyRand {
@@ -228,16 +228,16 @@ impl Game for Wide {
 
     // Heap-owning choices cross over sooner; see benchmarks/BASELINE.md.
     const CHILD_INDEX_THRESHOLD: usize = 8;
-    // Off, though this game is perfect information and could set it. The fast
-    // path skips enumerating and looking up the root's choices once the root is
+    // `MayChange`, though this game is perfect information and could claim
+    // more. Anything else stops enumerating the root's choices once the root is
     // expanded, and the root is the only node here wide enough to be indexed at
     // all — the rest are progressively expanded and hold a handful of children.
-    // With it on, 4 173 of the group's 5 464 200 `find_child` calls reach the
-    // hash index: 0.08%, the tail of one first expansion, so the threshold above
-    // decides nothing and a slower index could not move this bench. With it off
-    // the root re-enumerates every iteration and 8 192 073 of 13 652 100 are
-    // indexed, which is the wide-node lookup this group is named for.
-    const ROOT_CHOICES_INVARIANT: bool = false;
+    // With the root's choices known, 4 173 of the group's 5 464 200
+    // `find_child` calls reach the hash index: 0.08%, the tail of one first
+    // expansion, so the threshold above decides nothing and a slower index
+    // could not move this bench. With them re-enumerated every iteration,
+    // 8 192 073 of 13 652 100 are indexed, which is the wide-node lookup this
+    // group is named for.
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.ply >= WIDE_PLIES {
@@ -307,8 +307,10 @@ impl Game for Tiny {
     type Context = ();
     type Side = ();
 
-    // Perfect information: determinization is a copy, so the root cannot vary.
-    const ROOT_CHOICES_INVARIANT: bool = true;
+    // Perfect information, so `SameEverywhere` would be true too. Held at the
+    // root so this stays the search core it has always measured; `revisit`
+    // measures the difference.
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = ChoicesOnRevisit::SameAtRoot;
 
     fn status(&self, _: &()) -> Status<[f64; 2]> {
         if self.ply >= 8 {
@@ -333,6 +335,72 @@ impl Game for Tiny {
     fn rollout<R: Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 2] {
         while self.ply < 8 {
             let choice = (rng.next_u64() & 1) as u8;
+            self.apply_choice(&(), &choice, rng);
+        }
+        match self.status(&()) {
+            Status::Terminal(rewards) => rewards,
+            Status::Active { .. } | Status::Simultaneous { .. } => unreachable!(),
+        }
+    }
+
+    fn new_buffer(&self) -> Self {
+        *self
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+        *dest = *self;
+    }
+}
+
+// --------------------------------------------------------------- revisit ----
+
+const BUSHY_WIDTH: u8 = 24;
+const BUSHY_PLIES: u32 = 10;
+
+/// Perfect information at the branching factor of a real board game, with a
+/// state as cheap as `tiny`'s, so what changes between the two claims is the
+/// enumeration and child lookup a revisit repeats and nothing else.
+#[derive(Clone, Copy)]
+struct Bushy<const SAME_EVERYWHERE: bool> {
+    path: u64,
+    ply: u32,
+}
+
+impl<const SAME_EVERYWHERE: bool> Game for Bushy<SAME_EVERYWHERE> {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = ();
+    type Side = ();
+
+    const CHOICES_ON_REVISIT: ChoicesOnRevisit = if SAME_EVERYWHERE {
+        ChoicesOnRevisit::SameEverywhere
+    } else {
+        ChoicesOnRevisit::SameAtRoot
+    };
+
+    fn status(&self, _: &()) -> Status<[f64; 2]> {
+        if self.ply >= BUSHY_PLIES {
+            let value = (scramble(self.path) % 256) as f64 / 255.0;
+            Status::Terminal([value, 1.0 - value])
+        } else {
+            Status::Active {
+                player: (self.ply % 2) as u8,
+            }
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<u8>) {
+        out.extend(0..BUSHY_WIDTH);
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), choice: &u8, _: &mut R) {
+        self.path = scramble(self.path ^ u64::from(*choice));
+        self.ply += 1;
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, _: &(), rng: &mut R) -> [f64; 2] {
+        while self.ply < BUSHY_PLIES {
+            let choice = (rng.next_u64() % u64::from(BUSHY_WIDTH)) as u8;
             self.apply_choice(&(), &choice, rng);
         }
         match self.status(&()) {
@@ -410,5 +478,21 @@ fn bench_tiny(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_tiny, bench_narrow, bench_wide);
+fn bench_revisit(c: &mut Criterion) {
+    fn search<const SAME_EVERYWHERE: bool>(iterations: u32) {
+        let game = Bushy::<SAME_EVERYWHERE> { path: 0, ply: 0 };
+        let mut searcher = Searcher::new(&game);
+        searcher.search(&game, &(), 0, &config(iterations), None, &mut seeded());
+    }
+
+    let mut group = c.benchmark_group("revisit");
+    group.sample_size(20);
+    let iterations = 50_000;
+    group.throughput(Throughput::Elements(u64::from(iterations)));
+    group.bench_function("same_at_root", |b| b.iter(|| search::<false>(iterations)));
+    group.bench_function("same_everywhere", |b| b.iter(|| search::<true>(iterations)));
+    group.finish();
+}
+
+criterion_group!(benches, bench_tiny, bench_narrow, bench_wide, bench_revisit);
 criterion_main!(benches);

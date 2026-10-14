@@ -183,7 +183,6 @@ impl<P: Policy> Game for Cyclic<P> {
     // Re-enumerate the root's marginals every iteration. That is what every
     // simultaneous node below a root pays anyway, and at 128 arms it is where
     // the arm lookup this group exists to measure actually happens.
-    const ROOT_CHOICES_INVARIANT: bool = false;
 
     fn status(&self, _: &()) -> Status<[f64; MAX_ARITY]> {
         if self.resolved {
