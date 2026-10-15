@@ -129,6 +129,76 @@ that was not on it. A change that improves `narrow` while `wide` regresses has
 almost certainly traded child-lookup strategy for one branching factor at the
 other's expense — check `CHILD_INDEX_THRESHOLD` before believing the win.
 
+## `transposition` — what the graph costs and buys
+
+Machine and toolchain as above; `rustc 1.93.1 (01f6ddf75 2026-02-11)`. One
+session, measured against a load average of 17–18 on the ten cores, so the
+medians below are a same-session comparison between the two searchers and not
+a recorded floor. The zero-cost claim does not rest on them.
+
+### The tree is unchanged: compared as machine code
+
+```
+cargo bench --bench search --bench simultaneous --no-run     # in main and in the branch
+python3 benchmarks/codegen_diff.py MAIN/search-<hash> BRANCH/search-<hash> --all
+```
+
+| binary | functions compared | identical |
+|---|---:|---:|
+| `search` | 1 630 | 1 630 |
+| `simultaneous` | 1 620 | 1 620 |
+
+Every function, normalized for addresses and symbol hashes, is the same
+instruction stream before and after transposition support — which is a stronger
+statement than any timing this machine can make, and the reason none is
+offered. Getting there took two corrections, both recorded in
+`TRANSPOSITIONS.md` §3: extracting a body the graph shares and calling it from
+the tree changed `Node::expand_marginals` and the simultaneous search loop even
+under `#[inline(always)]`, so the tree keeps its originals and the graph has
+copies.
+
+### What the graph costs where it cannot merge, and buys where it can
+
+```
+cargo bench --bench transposition -- --warm-up-time 1 --measurement-time 4
+```
+
+| bench | tree | graph | |
+|---|---:|---:|:--|
+| `core` (100 000 iterations, no merges possible) | 86.0 ms | 102.7 ms | graph 1.19x slower |
+| `commute/10000` | 14.5 ms | 13.9 ms | graph 1.04x faster |
+| `commute/50000` | 67.0 ms | 60.8 ms | graph 1.10x faster |
+
+`core` is the search with the game removed and every key `None`, so it prices
+the graph's own machinery — the arena indirection, a link's statistics apart
+from its successor's, the path stamp — at its most visible. A game whose
+iteration does real work pays the same absolute amount over a larger total.
+`commute` picks 5 of 14 items scored on the set: the graph holds each set once
+and the tree once per order, so the graph does less work per iteration as well
+as better work.
+
+### Play at equal budgets
+
+```
+cargo run --release --example transposition_quality
+```
+
+Pick 5 of 16 items scored on the synergy of every pair — so the best set is not
+the greedy one — played to the end at equal iteration budgets, 80 seeds each,
+against a brute-forced optimum.
+
+| iterations | tree: mean of optimum | tree: optimal | graph: mean of optimum | graph: optimal |
+|---:|---:|---:|---:|---:|
+| 250 | 0.9728 | 31/80 | 0.9770 | 32/80 |
+| 1 000 | 0.9808 | 34/80 | 0.9859 | 37/80 |
+| 4 000 | 0.9926 | 53/80 | 0.9933 | 55/80 |
+| 16 000 | 0.9925 | 52/80 | 0.9930 | 56/80 |
+
+Better at every budget, and by a small margin: a single-player game five picks
+deep is a case UCB already handles well on a tree, so this is evidence of
+direction rather than of size. The size of the gain is a property of the game,
+and has to be measured on it.
+
 ## `simultaneous` — not measured
 
 `benches/simultaneous.rs` exists and compiles, with the three groups the design

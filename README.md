@@ -49,6 +49,46 @@ game; run it with `cargo run --example tic_tac_toe`.
 * **Tree reuse** across moves, and root parallelism behind the `parallel`
   feature.
 * **Progressive bias** from a game-supplied prior, evaluated once per child.
+* **Transpositions** — `GraphSearcher` merges every route into a position into
+  one node, for games that implement `Transposition`. See below.
+
+## Transpositions
+
+A tree grows one node per *order of play*. Where moves commute — pick these
+three cards in any order, resolve these abilities in any order — most of a tree
+is the same positions over again, each copy holding part of what one node would
+know. Implement `Transposition` to say which states are the same position, and
+search with `GraphSearcher` instead of `Searcher`:
+
+```rust
+impl Transposition for MyGame {
+    type Key = u128;
+    fn transposition_key(&self, ctx: &Ctx) -> Option<u128> {
+        // None wherever the position is not fixed by the moves that reached it:
+        // after a chance event, or where a determinization redraws what matters.
+        self.in_open_phase().then(|| self.position_hash())
+    }
+}
+
+let mut searcher = GraphSearcher::new(&state);   // same interface as Searcher
+```
+
+Every route into a position then reads and grows one node. Selection takes a
+successor's *shared* mean and explores against the *link's* own counts — UCT2
+in Childs, Brodeur and Kocsis's terms — with the ISMCTS availability rule
+unchanged. Repetitions are detected and end the descent, so a key may recur
+along a line of play.
+
+It is a separate searcher on purpose: `Searcher` and its node are untouched, so
+a game that never merges pays nothing for the ability, and the golden
+fingerprint of the tree search did not move. Where nothing merges — every key
+`None`, or every key unique to its history — `GraphSearcher` searches exactly as
+`Searcher` does, to the bit, which the test suite checks across every fixture,
+simultaneous ones included. Debug builds recompute each node's key on every
+visit and panic if it changes, which is how a key that reads hidden or random
+state shows up. `GraphRootParallel` is the `parallel` feature's pool over graphs.
+`TRANSPOSITIONS.md` has the design, the key contract, and what is not claimed —
+chiefly convergence, which UCT's proof does not cover on a graph.
 
 ## Simultaneous moves
 

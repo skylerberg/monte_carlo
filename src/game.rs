@@ -368,9 +368,15 @@ pub enum ChoicesOnRevisit {
 impl ChoicesOnRevisit {
     #[inline(always)]
     pub(crate) fn are_same_at<C>(self, node: &Node<C>) -> bool {
+        self.are_same(node.is_root())
+    }
+
+    /// [`ChoicesOnRevisit::are_same_at`] for a node that is or is not the root.
+    #[inline(always)]
+    pub(crate) fn are_same(self, at_root: bool) -> bool {
         match self {
             Self::MayChange => false,
-            Self::SameAtRoot => node.is_root(),
+            Self::SameAtRoot => at_root,
             Self::SameEverywhere => true,
         }
     }
@@ -656,6 +662,67 @@ pub trait Game: Sized {
     fn heuristic_bias(&self, _ctx: &Self::Context, _mover: u8) -> f32 {
         0.0
     }
+}
+
+/// What makes two positions the same position, for a game searched by
+/// [`crate::GraphSearcher`].
+///
+/// [`crate::Searcher`] grows a tree: two move orders that reach one position
+/// grow two nodes, and each learns half of what one would have. A
+/// `GraphSearcher` merges every node whose key matches into one, so the
+/// position is searched once and every route into it reads the same statistics.
+/// [`crate::Searcher`] never calls this, which is what keeps a game that does
+/// not implement it from paying anything for it.
+///
+/// # The contract
+///
+/// A node is merged by its key **and the player who moved into it**, since a
+/// node accumulates that player's reward. Within that, the key is the whole
+/// claim:
+///
+/// * **Equal keys mean interchangeable positions.** Everything that decides how
+///   the rest of the game can go — whose turn it is, what is legal, what any
+///   sequence of moves pays — must be the same for two states with equal keys.
+///   A key that conflates positions that play differently is a key that hands
+///   one of them the other's statistics and answers.
+/// * **A node's key is the same on every visit.** The search resolves an edge to
+///   a node once, on its first traversal, and every later iteration that takes
+///   the edge lands in that node — in whatever determinization it drew, and
+///   with whatever a chance event in [`Game::apply_choice`] or
+///   [`Game::advance`] produced on the way. So the key may read only what is
+///   fixed for every such iteration: never what a determinization resamples,
+///   and never the outcome of chance. Where the state is not fixed by the
+///   moves that reached it, return `None`.
+///
+/// `None` is always sound: that position is never merged, and the search
+/// treats it exactly as a tree would. So a game can claim keys only where it is
+/// sure — the phases of play where nothing hidden or random moves — and decline
+/// everywhere else.
+///
+/// Debug builds recompute the key on every visit to a node and panic when it
+/// differs from the one the node was merged under, which is how a key that
+/// reads hidden or random state shows up. Run your integration tests in debug
+/// before trusting a key in release.
+///
+/// Repetition is allowed. A key may recur along one line of play — the same
+/// position reached twice — and the search detects the cycle and stops the
+/// descent there rather than looping.
+///
+/// # Choosing a key type
+///
+/// An exact key — the position's own canonical encoding — cannot collide. A
+/// hash such as a `u128` is far smaller, and a collision merges two positions
+/// that should not be; at 128 bits the chance across a million nodes is about
+/// one in 10^27. A 64-bit hash is about one in 10^7 over the same million,
+/// which is small but is a property of every search you run.
+pub trait Transposition: Game {
+    /// The position's identity. Stored once per merged node, and hashed on
+    /// every lookup.
+    type Key: Clone + Eq + Hash;
+
+    /// This state's key, or `None` to keep it out of every merge. See the trait
+    /// documentation for what a key must and must not depend on.
+    fn transposition_key(&self, ctx: &Self::Context) -> Option<Self::Key>;
 }
 
 #[cfg(test)]

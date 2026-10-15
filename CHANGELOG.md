@@ -323,6 +323,36 @@ byte-identical and node counts are bit-identical in every configuration.
 
 ### Added
 
+* **`GraphSearcher`: transposition support.** A tree grows one node per order of
+  play, so where moves commute most of it is the same positions again, each copy
+  holding part of what one node would know. Implement the new `Transposition`
+  trait — a key per state, or `None` where the state is not fixed by the moves
+  that reached it — and search with `GraphSearcher`, and every route into a
+  position reads and grows one vertex. Selection takes the successor's shared
+  mean and explores against the link's own counts (UCT2), with the ISMCTS
+  availability rule unchanged; repetitions are detected and end the descent;
+  re-rooting keeps everything the new root reaches. `Graph`, `GraphNode` and
+  `GraphEdge` are the read-only view, and `GraphRootParallel` the `parallel`
+  feature's pool. Debug builds recompute every merged position's key on every
+  visit and panic if it moved, which is how a key that reads hidden or random
+  state shows up. `TRANSPOSITIONS.md` has the design and what is not claimed —
+  chiefly convergence, which UCT's proof does not cover on a graph.
+
+  **Zero cost for games that do not use it.** `Searcher` is untouched:
+  `benchmarks/codegen_diff.py` finds every function of the `search` and
+  `simultaneous` bench binaries identical, instruction for instruction, to
+  `main`'s, and the sequential golden fingerprint did not move. Where the graph
+  needs the tree's code it has its own copies — the obvious factoring, a body
+  extracted and called from both, changed the tree's machine code — and a graph
+  that never merges is required to search exactly as the tree does, bit for bit,
+  across every fixture, simultaneous ones included, which is what keeps the
+  copies in step. `RootParallel`'s pool and merge are now generic over the kind
+  of worker; its public API is unchanged.
+
+  Measured in `benchmarks/BASELINE.md`: where nothing merges the graph costs
+  ~19% on a game that is nothing but search, and on a game whose moves commute
+  it is faster than the tree and plays at least as well at every budget tried.
+
 * **`ChoicesOnRevisit::SameEverywhere`: a game whose choices never change is
   enumerated once per node, not once per visit.** Information Set MCTS asks for
   a node's legal choices on every visit, looks each one up among the node's

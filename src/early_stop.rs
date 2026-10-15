@@ -1,5 +1,5 @@
 use crate::game::{Game, PlayerSet};
-use crate::node::Node;
+use crate::node::{Node, Simul};
 use crate::rank::{leader_of, out_of_reach, out_of_reach_possible, Candidate};
 
 /// Whether the candidate the root would answer with is already guaranteed, so
@@ -148,13 +148,70 @@ pub(crate) fn settled<G: Game>(
     )
 }
 
+/// [`settled`]'s simultaneous branch, for a graph's root: the perspective
+/// player's own arms are the candidates, and `remaining` is already known to be
+/// non-zero and the candidate set complete.
+///
+/// A copy rather than the branch's shared body, because extracting the body
+/// changed the tree's machine code; `tests/transpositions.rs` holds the two to
+/// identical answers.
+pub(crate) fn settled_arms<G: Game>(
+    simul: &Simul<G::Choice>,
+    perspective: u8,
+    legal: &[bool],
+    remaining: u32,
+) -> bool {
+    // The returned move is a draw from a distribution, and proving that the
+    // leading candidate cannot be overtaken says nothing about a draw.
+    // Only an argmax root policy is what this proves.
+    if G::SIMULTANEOUS_POLICY.mixes() {
+        return false;
+    }
+    debug_assert!(
+        simul.arm_policy.is_empty(),
+        "mcts: the early-termination proof shows that the leading candidate \
+         cannot be overtaken, which is only the returned answer while the root \
+         policy is an argmax. Under a mixing policy the answer is a draw from a \
+         distribution and the proof says nothing about it."
+    );
+    let Some(slot) = simul.players.slot_of(perspective) else {
+        return false;
+    };
+    // One iteration bumps exactly one arm per player, so an arm's selections
+    // are a conserved budget just as a child's are and the tier bound
+    // carries over verbatim.
+    let arms = &simul.arm_stats[simul.slot_range(slot)];
+    // A mask built before the last arm was created describes a different
+    // candidate set. Refusing to prove is always safe; proving against a
+    // stale mask is not.
+    if legal.len() != arms.len() {
+        return false;
+    }
+    // Restricting both sides of the comparison to the legal arms is what
+    // makes the leader the arm actually returned; proving something about
+    // an arm the position withholds proves nothing about the answer.
+    proven(
+        arms.iter()
+            .zip(legal)
+            .enumerate()
+            .filter(|(_, (_, &legal))| legal)
+            .map(|(i, (arm, _))| {
+                (
+                    i,
+                    Candidate::new(arm.visits, arm.times_available, arm.cumulative_reward),
+                )
+            }),
+        remaining,
+    )
+}
+
 /// Whether the candidate [`leader_of`] would answer with is out of every
 /// rival's reach.
 ///
 /// Two passes over the same iterator rather than one over a materialized slice:
 /// this runs once per iteration on the hot path, and neither a root's children
 /// nor a slot's arms is a slice of the statistics the ranking reads.
-fn proven<I>(mut candidates: I, remaining: u32) -> bool
+pub(crate) fn proven<I>(mut candidates: I, remaining: u32) -> bool
 where
     I: Iterator<Item = (usize, Candidate)> + Clone,
 {

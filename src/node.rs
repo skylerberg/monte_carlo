@@ -669,31 +669,9 @@ impl<C> Node<C> {
     pub(crate) fn push_joint(&mut self, key: JointKey, player: u8, threshold: usize) -> usize {
         let position = self.children.len();
         self.children.push(Node::new(player, NodeKind::Joint, None));
-
-        let simul = self
-            .simul_mut()
-            .expect("mcts: a joint successor belongs to a simultaneous node");
-        simul.joint_keys.push(key);
-
-        if simul.joint_index.is_none() {
-            if simul.joint_keys.len() > threshold {
-                simul.build_joint_index();
-            }
-            return position;
-        }
-
-        let Simul {
-            joint_keys,
-            joint_index,
-            ..
-        } = simul;
-        if let Some(index) = joint_index {
-            let _ = index
-                .table
-                .insert_unique(hash_of(&key), position as u32, |&i| {
-                    hash_of(&joint_keys[i as usize])
-                });
-        }
+        self.simul_mut()
+            .expect("mcts: a joint successor belongs to a simultaneous node")
+            .record_joint(key, position, threshold);
         position
     }
 
@@ -946,7 +924,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
 }
 
 impl<C> Simul<C> {
-    fn new(players: PlayerSet) -> Self {
+    pub(crate) fn new(players: PlayerSet) -> Self {
         let arity = players.len();
         debug_assert!(
             arity > 0 && arity <= PlayerSet::MAX_SIMULTANEOUS,
@@ -1024,9 +1002,132 @@ impl<C> Simul<C> {
             self.arm_policy.reserve_exact(arms);
         }
     }
+
+    /// [`Node::debug_check_arms`] for a simultaneous vertex in a graph, whose
+    /// `successors` joint successors `joint_keys` runs parallel to.
+    ///
+    /// This and the two methods below are copies of `Node` methods rather than
+    /// their shared bodies on purpose: moving a body behind a call changed the
+    /// tree's machine code even with forced inlining, and the tree must compile
+    /// to the instructions it always has. `tests/transpositions.rs` holds each
+    /// copy to its original by requiring a graph that never merges to search
+    /// exactly as the tree does, simultaneous fixtures included.
+    #[inline(always)]
+    pub(crate) fn debug_check_arrays(&self, successors: usize) {
+        debug_assert_eq!(
+            self.arm_stats.len(),
+            self.arm_choices.len(),
+            "mcts: arm statistics and arm choices are out of step"
+        );
+        debug_assert!(
+            self.arm_policy.is_empty() || self.arm_policy.len() == self.arm_stats.len(),
+            "mcts: arm policy state is out of step with arm statistics"
+        );
+        debug_assert_eq!(
+            self.starts[self.arity as usize] as usize,
+            self.arm_stats.len(),
+            "mcts: slot boundaries do not cover the arm array"
+        );
+        debug_assert_eq!(
+            self.joint_keys.len(),
+            successors,
+            "mcts: joint keys and joint children are out of step"
+        );
+    }
+
+    /// [`Node::mark_every_arm_available`], stamped at `epoch`. A copy; see
+    /// [`Simul::debug_check_arrays`].
+    #[inline(always)]
+    pub(crate) fn mark_every_arm_available(&mut self, epoch: u32, policy: SimultaneousPolicy) {
+        let caches_ln = policy.reads_ln_times_available();
+        for arm in &mut self.arm_stats {
+            arm.times_available += 1;
+            if caches_ln {
+                arm.ln_times_available = (arm.times_available as f64).ln();
+            }
+            arm.avail_epoch = epoch;
+        }
+    }
+
+    /// Append `key` as the joint successor the owner holds at `position`, which
+    /// is where the owner's successor list has just put it.
+    #[inline(always)]
+    pub(crate) fn record_joint(&mut self, key: JointKey, position: usize, threshold: usize) {
+        self.joint_keys.push(key);
+
+        if self.joint_index.is_none() {
+            if self.joint_keys.len() > threshold {
+                self.build_joint_index();
+            }
+            return;
+        }
+
+        let Simul {
+            joint_keys,
+            joint_index,
+            ..
+        } = self;
+        if let Some(index) = joint_index {
+            let _ = index
+                .table
+                .insert_unique(hash_of(&key), position as u32, |&i| {
+                    hash_of(&joint_keys[i as usize])
+                });
+        }
+    }
 }
 
 impl<C: Clone + Eq + Hash> Simul<C> {
+    /// [`Node::expand_marginals`], stamped at `epoch`. A copy; see
+    /// [`Simul::debug_check_arrays`].
+    #[inline(always)]
+    pub(crate) fn expand_slot(
+        &mut self,
+        slot: usize,
+        choices: &[C],
+        epoch: u32,
+        policy: SimultaneousPolicy,
+        threshold: usize,
+    ) -> usize {
+        let policy_in_use = policy.mixes();
+        let caches_ln = policy.reads_ln_times_available();
+
+        // `grow_slot` is the sole builder, and holds the invariant: an arm set
+        // past the threshold has an index. Building here as well would be a
+        // second copy of the threshold test that can never fire — a node holds
+        // no arms before its first growth, and any growth that crosses the
+        // threshold leaves an index behind.
+        debug_assert!(
+            self.arm_index.is_some() || self.arm_choices.len() <= threshold,
+            "mcts: an arm set past the index threshold has no index"
+        );
+        if self.slot_len(slot) == 0 {
+            self.reserve_slot(choices.len(), policy_in_use);
+        }
+
+        let mut legal = 0;
+        for choice in choices {
+            match self.find_arm(slot, choice) {
+                // A duplicate within the enumeration must not be counted twice.
+                Some(a) if self.arm_stats[a].avail_epoch == epoch => {}
+                Some(a) => {
+                    let arm = &mut self.arm_stats[a];
+                    arm.times_available += 1;
+                    if caches_ln {
+                        arm.ln_times_available = (arm.times_available as f64).ln();
+                    }
+                    arm.avail_epoch = epoch;
+                    legal += 1;
+                }
+                None => {
+                    self.grow_slot(slot, choice, epoch, policy_in_use, threshold);
+                    legal += 1;
+                }
+            }
+        }
+        legal
+    }
+
     /// The global position an [`ArmRef`] names.
     #[inline(always)]
     fn arm_at(&self, arm: ArmRef) -> usize {

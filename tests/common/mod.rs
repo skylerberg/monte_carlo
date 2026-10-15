@@ -4,10 +4,13 @@ use mcts::rand_core::Rng;
 use mcts::{Game, Status};
 
 mod simul;
+mod transposition;
 // Flat, so a test names `common::BiasedRps`; allowed unused because a test
 // binary that touches no simultaneous fixture would otherwise fail the build.
 #[allow(unused_imports)]
 pub use simul::*;
+#[allow(unused_imports)]
+pub use transposition::*;
 
 /// Three choices, three plies deep, everybody always wins. Used to check that
 /// exploration is even when nothing distinguishes the choices.

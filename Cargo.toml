@@ -49,6 +49,10 @@ harness = false
 name = "simultaneous"
 harness = false
 
+[[bench]]
+name = "transposition"
+harness = false
+
 # Tests run optimized. The suite is dominated by search loops — the sequential
 # fingerprint alone runs 405 searches — and at `opt-level = 0` that is minutes
 # per run rather than seconds, which is a cost paid on every edit. Debug

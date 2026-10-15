@@ -4,8 +4,9 @@ use std::sync::atomic::AtomicBool;
 use rand_core::Rng;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::game::Game;
-use crate::node::{Node, NodeKind};
+use crate::game::{Game, Transposition};
+use crate::graph::{link_stats, Graph, GraphSearcher};
+use crate::node::{Node, NodeKind, Simul};
 use crate::rank::{leader_of, Candidate};
 use crate::search::{Config, RootPolicy, SearchResult, Searcher, StopReason};
 use crate::util::uniform_01;
@@ -30,9 +31,189 @@ const _: () = assert!(CACHE_LINE == 128);
 /// rounds the size up as well as the base, so the separation is a property of
 /// the type rather than of where the allocator happened to put it.
 #[repr(align(128))]
-struct Worker<G: Game, R> {
-    searcher: Searcher<G>,
+struct Worker<S, R> {
+    searcher: S,
     rng: R,
+}
+
+/// What the pool needs of one worker's searcher, whether it grows a tree or a
+/// graph. The merge reads a root through this and nothing else, so both kinds
+/// of pool answer by one rule.
+trait RootWorker<G: Game> {
+    fn spawn(template: &G) -> Self;
+    fn run<R: Rng + ?Sized>(
+        &mut self,
+        state: &G,
+        ctx: &G::Context,
+        perspective: u8,
+        cfg: &Config,
+        cancel: Option<&AtomicBool>,
+        rng: &mut R,
+    ) -> SearchResult<G::Choice>;
+    fn disarm(&mut self);
+    /// The retained root's visit count, or `None` if nothing is retained.
+    fn root_visits(&self) -> Option<u32>;
+    /// The retained root's marginal bandits, at a simultaneous root.
+    fn root_simul(&self) -> Option<&Simul<G::Choice>>;
+    /// Every candidate at a sequential root: its choice, its selections, the
+    /// opportunities they were drawn from, and a total reward whose mean is
+    /// what the root ranks the choice by.
+    fn for_each_root_child(&self, f: impl FnMut(&G::Choice, u32, u32, f64));
+}
+
+impl<G: Game> RootWorker<G> for Searcher<G> {
+    fn spawn(template: &G) -> Self {
+        Searcher::new(template)
+    }
+
+    fn run<R: Rng + ?Sized>(
+        &mut self,
+        state: &G,
+        ctx: &G::Context,
+        perspective: u8,
+        cfg: &Config,
+        cancel: Option<&AtomicBool>,
+        rng: &mut R,
+    ) -> SearchResult<G::Choice> {
+        self.search(state, ctx, perspective, cfg, cancel, rng)
+    }
+
+    fn disarm(&mut self) {
+        Searcher::disarm(self);
+    }
+
+    fn root_visits(&self) -> Option<u32> {
+        self.tree().map(Node::visits)
+    }
+
+    fn root_simul(&self) -> Option<&Simul<G::Choice>> {
+        self.tree().and_then(Node::simul)
+    }
+
+    fn for_each_root_child(&self, mut f: impl FnMut(&G::Choice, u32, u32, f64)) {
+        let Some(root) = self.tree() else {
+            return;
+        };
+        for child in root.children() {
+            debug_assert_eq!(
+                child.kind(),
+                NodeKind::Choice,
+                "mcts: the sequential root merge reached a joint successor. Joint \
+                 edges are keyed by per-tree marginal indices and must never be \
+                 merged across workers; a simultaneous root merges the perspective \
+                 player's marginals instead."
+            );
+            let choice = child
+                .edge()
+                .choice()
+                .expect("a sequential root's children all carry a choice");
+            f(
+                choice,
+                child.visits(),
+                child.times_available,
+                child.cumulative_reward(),
+            );
+        }
+    }
+}
+
+impl<G: Transposition> RootWorker<G> for GraphSearcher<G> {
+    fn spawn(template: &G) -> Self {
+        GraphSearcher::new(template)
+    }
+
+    fn run<R: Rng + ?Sized>(
+        &mut self,
+        state: &G,
+        ctx: &G::Context,
+        perspective: u8,
+        cfg: &Config,
+        cancel: Option<&AtomicBool>,
+        rng: &mut R,
+    ) -> SearchResult<G::Choice> {
+        self.search(state, ctx, perspective, cfg, cancel, rng)
+    }
+
+    fn disarm(&mut self) {
+        GraphSearcher::disarm(self);
+    }
+
+    fn root_visits(&self) -> Option<u32> {
+        self.graph().map(|graph| graph.root_vertex().visits)
+    }
+
+    fn root_simul(&self) -> Option<&Simul<G::Choice>> {
+        self.graph()
+            .and_then(|graph| graph.root_vertex().joint())
+            .map(|joint| &joint.simul)
+    }
+
+    fn for_each_root_child(&self, mut f: impl FnMut(&G::Choice, u32, u32, f64)) {
+        let Some(graph) = self.graph() else {
+            return;
+        };
+        for link in &graph.root_vertex().links {
+            let (visits, times_available, reward) = link_stats(&graph.vertices, link);
+            f(&link.choice, visits, times_available, reward);
+        }
+    }
+}
+
+fn spawn_workers<G: Game, S: RootWorker<G>, R>(
+    threads: usize,
+    template: &G,
+    mut make_rng: impl FnMut(usize) -> R,
+) -> Vec<Worker<S, R>> {
+    (0..threads)
+        .map(|i| Worker {
+            searcher: S::spawn(template),
+            rng: make_rng(i),
+        })
+        .collect()
+}
+
+/// Run every worker on its own thread, then merge. See [`RootParallel::search`].
+fn search_workers<G, S, R>(
+    workers: &mut [Worker<S, R>],
+    state: &G,
+    ctx: &G::Context,
+    perspective: u8,
+    cfg: &Config,
+    cancel: Option<&AtomicBool>,
+) -> SearchResult<G::Choice>
+where
+    G: Game + Sync,
+    G::Choice: Send + Sync,
+    G::Context: Sync,
+    S: RootWorker<G> + Send,
+    R: Rng + Send,
+{
+    // Disarmed before the refusal, not after: a worker's `Searcher::search`
+    // consumes its own arming as its first statement, and a config rejected
+    // here means no worker's runs at all — which would leave every retained
+    // tree armed for a position the pool never searched.
+    if let Some(refusal) = cfg.refusal() {
+        for worker in workers.iter_mut() {
+            worker.searcher.disarm();
+        }
+        panic!("{refusal}");
+    }
+
+    let results: Vec<SearchResult<G::Choice>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = workers
+            .iter_mut()
+            .map(|worker| {
+                let Worker { searcher, rng } = worker;
+                scope.spawn(move || searcher.run(state, ctx, perspective, cfg, cancel, rng))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("mcts: worker thread panicked"))
+            .collect()
+    });
+
+    merge(workers, state, ctx, perspective, cfg, results)
 }
 
 /// Root parallelisation: independent trees, independent determinizations, one
@@ -42,7 +223,7 @@ struct Worker<G: Game, R> {
 /// Every `Send`/`Sync` bound lives on this type, not on [`Game`], so games that
 /// are not thread-safe and targets without threads are unaffected.
 pub struct RootParallel<G: Game, R> {
-    workers: Vec<Worker<G, R>>,
+    workers: Vec<Worker<Searcher<G>, R>>,
 }
 
 impl<G, R> RootParallel<G, R>
@@ -56,15 +237,10 @@ where
     /// `make_rng` is called once per worker with its index. Derive each seed
     /// deterministically from one master seed if you want reproducible runs;
     /// results are then reproducible for a fixed thread count.
-    pub fn new(threads: usize, template: &G, mut make_rng: impl FnMut(usize) -> R) -> Self {
+    pub fn new(threads: usize, template: &G, make_rng: impl FnMut(usize) -> R) -> Self {
         assert!(threads > 0, "mcts: RootParallel needs at least one thread");
         Self {
-            workers: (0..threads)
-                .map(|i| Worker {
-                    searcher: Searcher::new(template),
-                    rng: make_rng(i),
-                })
-                .collect(),
+            workers: spawn_workers(threads, template, make_rng),
         }
     }
 
@@ -129,236 +305,261 @@ where
         cfg: &Config,
         cancel: Option<&AtomicBool>,
     ) -> SearchResult<G::Choice> {
-        // Disarmed before the refusal, not after: a worker's `Searcher::search`
-        // consumes its own arming as its first statement, and a config rejected
-        // here means no worker's runs at all — which would leave every retained
-        // tree armed for a position the pool never searched.
-        if let Some(refusal) = cfg.refusal() {
-            for worker in &mut self.workers {
-                worker.searcher.disarm();
-            }
-            panic!("{refusal}");
+        search_workers(&mut self.workers, state, ctx, perspective, cfg, cancel)
+    }
+}
+
+/// [`RootParallel`] over [`GraphSearcher`]s: each thread grows its own
+/// transposition graph, and the roots merge by the same rule.
+///
+/// Positions are merged within a worker, never across workers — each graph is
+/// built from its own determinizations, and only the root's candidates are
+/// pooled, keyed by `Choice`, exactly as the tree pool pools them.
+pub struct GraphRootParallel<G: Transposition, R> {
+    workers: Vec<Worker<GraphSearcher<G>, R>>,
+}
+
+impl<G, R> GraphRootParallel<G, R>
+where
+    G: Transposition + Send + Sync,
+    G::Choice: Send + Sync,
+    G::Key: Send,
+    G::Context: Sync,
+    G::Side: Send,
+    R: Rng + Send,
+{
+    /// See [`RootParallel::new`].
+    pub fn new(threads: usize, template: &G, make_rng: impl FnMut(usize) -> R) -> Self {
+        assert!(
+            threads > 0,
+            "mcts: GraphRootParallel needs at least one thread"
+        );
+        Self {
+            workers: spawn_workers(threads, template, make_rng),
         }
-
-        let results: Vec<SearchResult<G::Choice>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = self
-                .workers
-                .iter_mut()
-                .map(|worker| {
-                    let Worker { searcher, rng } = worker;
-                    scope.spawn(move || searcher.search(state, ctx, perspective, cfg, cancel, rng))
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().expect("mcts: worker thread panicked"))
-                .collect()
-        });
-
-        self.merge(state, ctx, perspective, cfg, results)
     }
 
-    /// Combine the per-worker trees into one answer.
-    ///
-    /// A simultaneous root merges the perspective player's **marginals**, keyed
-    /// by `Choice`, and never touches a joint successor: joint edges are keyed
-    /// by per-tree marginal indices, and each worker appended its arms in its
-    /// own determinizations' order, so worker 1's arm 2 is not worker 2's arm 2
-    /// and summing joint children across workers would pool the statistics of
-    /// different action pairs with nothing to catch it. A `Choice` means the
-    /// same thing in every tree.
-    ///
-    /// The merged answer is read off whatever the single-threaded extraction
-    /// would read it off: pooled visits where the policy is pure, and the
-    /// pooled mixed strategy — sampled or argmaxed, per [`RootPolicy`] — where
-    /// it mixes. `best_visits` and `best_mean_reward` are always the pooled
-    /// statistics of the action returned; they report on the action, not on how
-    /// it was chosen.
-    fn merge(
+    /// Number of workers.
+    pub fn threads(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// The per-worker graphs, for inspection.
+    pub fn graphs(&self) -> impl Iterator<Item = &Graph<G::Choice, G::Key>> {
+        self.workers.iter().filter_map(|w| w.searcher.graph())
+    }
+
+    /// Re-root every worker's graph at `choice`.
+    pub fn reuse_subtree(&mut self, choice: &G::Choice) {
+        for worker in &mut self.workers {
+            worker.searcher.reuse_subtree(choice);
+        }
+    }
+
+    /// Re-root every worker's graph at the joint action actually played. See
+    /// [`RootParallel::reuse_joint`].
+    pub fn reuse_joint(&mut self, played: &[(u8, G::Choice)]) {
+        for worker in &mut self.workers {
+            worker.searcher.reuse_joint(played);
+        }
+    }
+
+    /// Discard every worker's retained graph.
+    pub fn clear_graphs(&mut self) {
+        for worker in &mut self.workers {
+            worker.searcher.clear_graph();
+        }
+    }
+
+    /// See [`RootParallel::search`]: the same budget, the same merge and the
+    /// same panics.
+    pub fn search(
         &mut self,
         state: &G,
         ctx: &G::Context,
         perspective: u8,
         cfg: &Config,
-        results: Vec<SearchResult<G::Choice>>,
+        cancel: Option<&AtomicBool>,
     ) -> SearchResult<G::Choice> {
-        let stop_reason = merged_stop_reason(&results);
-        if stop_reason == StopReason::SingleChoice {
-            return results.into_iter().next().expect("at least one worker");
-        }
+        search_workers(&mut self.workers, state, ctx, perspective, cfg, cancel)
+    }
+}
 
-        let simultaneous = self.workers.iter().any(|worker| {
-            worker
-                .searcher
-                .tree()
-                .is_some_and(|root| root.simultaneous_players().is_some())
-        });
-        // Under `Duct` the per-worker strategy is one-hot at that worker's
-        // leading arm, so the pooled counts already say the same thing and both
-        // root policies read the pooled leader. Under a policy that mixes,
-        // neither policy may: `duct::best_arm` argmaxes the same
-        // availability-divided strategy weight `Sampled` draws from, so a merge
-        // answering `MostVisited` with the pooled-visit argmax would return an
-        // action the single-threaded path was deliberately corrected away from.
-        let mixes = simultaneous && G::SIMULTANEOUS_POLICY.mixes();
-        let sample = mixes && cfg.simultaneous.root_policy == RootPolicy::Sampled;
+/// Combine the per-worker trees into one answer.
+///
+/// A simultaneous root merges the perspective player's **marginals**, keyed
+/// by `Choice`, and never touches a joint successor: joint edges are keyed
+/// by per-tree marginal indices, and each worker appended its arms in its
+/// own determinizations' order, so worker 1's arm 2 is not worker 2's arm 2
+/// and summing joint children across workers would pool the statistics of
+/// different action pairs with nothing to catch it. A `Choice` means the
+/// same thing in every tree.
+///
+/// The merged answer is read off whatever the single-threaded extraction
+/// would read it off: pooled visits where the policy is pure, and the
+/// pooled mixed strategy — sampled or argmaxed, per [`RootPolicy`] — where
+/// it mixes. `best_visits` and `best_mean_reward` are always the pooled
+/// statistics of the action returned; they report on the action, not on how
+/// it was chosen.
+fn merge<G: Game, S: RootWorker<G>, R: Rng>(
+    workers: &mut [Worker<S, R>],
+    state: &G,
+    ctx: &G::Context,
+    perspective: u8,
+    cfg: &Config,
+    results: Vec<SearchResult<G::Choice>>,
+) -> SearchResult<G::Choice> {
+    let stop_reason = merged_stop_reason(&results);
+    if stop_reason == StopReason::SingleChoice {
+        return results.into_iter().next().expect("at least one worker");
+    }
 
-        let mut merged = Merged::new();
-        let mut strategy = Vec::new();
-        let mut shares = Vec::new();
-        // A worker's tree holds every action any of its determinizations
-        // offered, so merging unfiltered can return a move the perspective
-        // player does not have in the real position. The single-threaded path
-        // filters against the position at extraction; this is that filter,
-        // applied by seeding the merge with the legal actions and refusing to
-        // add any other.
-        let mut legal = Vec::new();
-        if simultaneous {
-            state.choices_for_into(ctx, perspective, &mut legal);
-        } else {
-            state.choices_into(ctx, &mut legal);
-        }
-        // Seeded in the first worker's own discovery order, then in the
-        // position's for anything that worker never saw. Both sides rank by
-        // `crate::rank` and both keep the incumbent on a tie, so what is left to
-        // agree on is the order the tie is scanned in: a candidate list built
-        // from the position runs in a different order from the arms of a tree
-        // that met them across determinizations, and a pool of one worker would
-        // then answer a tied root differently from the `Searcher` it is a pool
-        // of. Exact ties survive any budget — an all-arms-equal root at a
-        // budget below its own width has them at every seed.
-        let first_tree = self
-            .workers
-            .first()
-            .and_then(|worker| worker.searcher.tree());
-        if let Some(root) = first_tree {
-            let playable: FxHashSet<&G::Choice> = legal.iter().collect();
-            let mut seed = |choice: &G::Choice| {
-                if playable.contains(choice) {
-                    merged.slot(choice);
-                }
-            };
-            match root.simul() {
-                Some(simul) => {
-                    if let Some(slot) = simul.players.slot_of(perspective) {
-                        let marginals = simul.marginals(slot);
-                        for arm in 0..marginals.len() {
-                            seed(marginals.choice(arm));
-                        }
-                    }
-                }
-                None => {
-                    for child in root.children() {
-                        if let Some(choice) = child.edge().choice() {
-                            seed(choice);
-                        }
+    let simultaneous = workers
+        .iter()
+        .any(|worker| worker.searcher.root_simul().is_some());
+    // Under `Duct` the per-worker strategy is one-hot at that worker's
+    // leading arm, so the pooled counts already say the same thing and both
+    // root policies read the pooled leader. Under a policy that mixes,
+    // neither policy may: `duct::best_arm` argmaxes the same
+    // availability-divided strategy weight `Sampled` draws from, so a merge
+    // answering `MostVisited` with the pooled-visit argmax would return an
+    // action the single-threaded path was deliberately corrected away from.
+    let mixes = simultaneous && G::SIMULTANEOUS_POLICY.mixes();
+    let sample = mixes && cfg.simultaneous.root_policy == RootPolicy::Sampled;
+
+    let mut merged = Merged::new();
+    let mut strategy = Vec::new();
+    let mut shares = Vec::new();
+    // A worker's tree holds every action any of its determinizations
+    // offered, so merging unfiltered can return a move the perspective
+    // player does not have in the real position. The single-threaded path
+    // filters against the position at extraction; this is that filter,
+    // applied by seeding the merge with the legal actions and refusing to
+    // add any other.
+    let mut legal = Vec::new();
+    if simultaneous {
+        state.choices_for_into(ctx, perspective, &mut legal);
+    } else {
+        state.choices_into(ctx, &mut legal);
+    }
+    // Seeded in the first worker's own discovery order, then in the
+    // position's for anything that worker never saw. Both sides rank by
+    // `crate::rank` and both keep the incumbent on a tie, so what is left to
+    // agree on is the order the tie is scanned in: a candidate list built
+    // from the position runs in a different order from the arms of a tree
+    // that met them across determinizations, and a pool of one worker would
+    // then answer a tied root differently from the `Searcher` it is a pool
+    // of. Exact ties survive any budget — an all-arms-equal root at a
+    // budget below its own width has them at every seed.
+    let first_tree = workers
+        .first()
+        .map(|worker| &worker.searcher)
+        .filter(|searcher| searcher.root_visits().is_some());
+    if let Some(searcher) = first_tree {
+        let playable: FxHashSet<&G::Choice> = legal.iter().collect();
+        let mut seed = |choice: &G::Choice| {
+            if playable.contains(choice) {
+                merged.slot(choice);
+            }
+        };
+        match searcher.root_simul() {
+            Some(simul) => {
+                if let Some(slot) = simul.players.slot_of(perspective) {
+                    let marginals = simul.marginals(slot);
+                    for arm in 0..marginals.len() {
+                        seed(marginals.choice(arm));
                     }
                 }
             }
+            None => searcher.for_each_root_child(|choice, _, _, _| seed(choice)),
         }
-        for choice in &legal {
-            merged.slot(choice);
-        }
-        for worker in &self.workers {
-            let Some(root) = worker.searcher.tree() else {
-                continue;
-            };
-            match root.simul() {
-                Some(simul) => {
-                    let Some(slot) = simul.players.slot_of(perspective) else {
+    }
+    for choice in &legal {
+        merged.slot(choice);
+    }
+    for worker in workers.iter() {
+        let Some(root_visits) = worker.searcher.root_visits() else {
+            continue;
+        };
+        match worker.searcher.root_simul() {
+            Some(simul) => {
+                let Some(slot) = simul.players.slot_of(perspective) else {
+                    continue;
+                };
+                let marginals = simul.marginals(slot);
+                let stats = &simul.arm_stats[simul.slot_range(slot)];
+                if mixes {
+                    // Normalized per worker, then renormalized by `spread`
+                    // over the arms that survive the legality filter: a raw
+                    // `strategy_sum` would weight whichever tree ran
+                    // longest, and a deadline or a cancellation makes
+                    // worker iteration counts unequal in practice.
+                    marginals.policy_into(&mut strategy);
+                }
+                shares.clear();
+                for arm in 0..marginals.len() {
+                    let Some(index) = merged.get(marginals.choice(arm)) else {
                         continue;
                     };
-                    let marginals = simul.marginals(slot);
-                    let stats = &simul.arm_stats[simul.slot_range(slot)];
+                    merged.add(
+                        index,
+                        stats[arm].visits,
+                        stats[arm].times_available,
+                        stats[arm].cumulative_reward,
+                    );
                     if mixes {
-                        // Normalized per worker, then renormalized by `spread`
-                        // over the arms that survive the legality filter: a raw
-                        // `strategy_sum` would weight whichever tree ran
-                        // longest, and a deadline or a cancellation makes
-                        // worker iteration counts unequal in practice.
-                        marginals.policy_into(&mut strategy);
+                        shares.push((index, strategy[arm]));
                     }
-                    shares.clear();
-                    for arm in 0..marginals.len() {
-                        let Some(index) = merged.get(marginals.choice(arm)) else {
-                            continue;
-                        };
-                        merged.add(
-                            index,
-                            stats[arm].visits,
-                            stats[arm].times_available,
-                            stats[arm].cumulative_reward,
-                        );
-                        if mixes {
-                            shares.push((index, strategy[arm]));
+                }
+                spread(root_visits as f64, &shares, &mut merged.strategy);
+            }
+            None => {
+                worker
+                    .searcher
+                    .for_each_root_child(|choice, visits, times_available, reward| {
+                        if let Some(index) = merged.get(choice) {
+                            merged.add(index, visits, times_available, reward);
                         }
-                    }
-                    spread(root.visits() as f64, &shares, &mut merged.strategy);
-                }
-                None => {
-                    for child in root.children() {
-                        debug_assert_eq!(
-                            child.kind(),
-                            NodeKind::Choice,
-                            "mcts: the sequential root merge reached a joint successor. Joint \
-                             edges are keyed by per-tree marginal indices and must never be \
-                             merged across workers; a simultaneous root merges the perspective \
-                             player's marginals instead."
-                        );
-                        let choice = child
-                            .edge()
-                            .choice()
-                            .expect("a sequential root's children all carry a choice");
-                        let Some(index) = merged.get(choice) else {
-                            continue;
-                        };
-                        merged.add(
-                            index,
-                            child.visits(),
-                            child.times_available,
-                            child.cumulative_reward(),
-                        );
-                    }
-                }
+                    });
             }
         }
+    }
 
-        // Seeding makes `order` non-empty before any worker has contributed, so
-        // the merge asks whether anything was actually merged rather than
-        // whether the map is empty.
-        let contributed = merged.visits.iter().any(|&visits| visits > 0);
-        if merged.order.is_empty() || !contributed {
-            // No worker completed an iteration; fall back to any worker's answer.
-            return results.into_iter().next().expect("at least one worker");
-        }
+    // Seeding makes `order` non-empty before any worker has contributed, so
+    // the merge asks whether anything was actually merged rather than
+    // whether the map is empty.
+    let contributed = merged.visits.iter().any(|&visits| visits > 0);
+    if merged.order.is_empty() || !contributed {
+        // No worker completed an iteration; fall back to any worker's answer.
+        return results.into_iter().next().expect("at least one worker");
+    }
 
-        let best = if sample {
-            // Worker 0's rng, borrowed only now that the thread scope has
-            // closed, so the draw stays deterministic for a fixed thread count.
-            let rng = &mut self.workers[0].rng;
-            sample_merged(&merged.strategy, rng).unwrap_or_else(|| merged.leader())
-        } else if mixes {
-            merged.strategy_leader().unwrap_or_else(|| merged.leader())
-        } else {
-            merged.leader()
-        };
+    let best = if sample {
+        // Worker 0's rng, borrowed only now that the thread scope has
+        // closed, so the draw stays deterministic for a fixed thread count.
+        let rng = &mut workers[0].rng;
+        sample_merged(&merged.strategy, rng).unwrap_or_else(|| merged.leader())
+    } else if mixes {
+        merged.strategy_leader().unwrap_or_else(|| merged.leader())
+    } else {
+        merged.leader()
+    };
 
-        let best_visits = merged.visits[best];
-        let best_mean_reward = if best_visits == 0 {
-            0.0
-        } else {
-            merged.reward[best] / best_visits as f64
-        };
+    let best_visits = merged.visits[best];
+    let best_mean_reward = if best_visits == 0 {
+        0.0
+    } else {
+        merged.reward[best] / best_visits as f64
+    };
 
-        SearchResult {
-            choice: merged.order.swap_remove(best),
-            iterations_used: results.iter().map(|r| r.iterations_used).sum(),
-            reused_iterations: results.iter().map(|r| r.reused_iterations).sum(),
-            stop_reason,
-            root_visits: results.iter().map(|r| r.root_visits).sum(),
-            best_visits,
-            best_mean_reward,
-        }
+    SearchResult {
+        choice: merged.order.swap_remove(best),
+        iterations_used: results.iter().map(|r| r.iterations_used).sum(),
+        reused_iterations: results.iter().map(|r| r.reused_iterations).sum(),
+        stop_reason,
+        root_visits: results.iter().map(|r| r.root_visits).sum(),
+        best_visits,
+        best_mean_reward,
     }
 }
 
@@ -544,11 +745,14 @@ mod tests {
     /// is what makes the separation impossible to lose to an allocator.
     #[test]
     fn no_two_workers_share_a_cache_line() {
-        assert!(align_of::<Worker<Ladder, WyRand>>() >= CACHE_LINE);
-        assert_eq!(size_of::<Worker<Ladder, WyRand>>() % CACHE_LINE, 0);
+        assert!(align_of::<Worker<Searcher<Ladder>, WyRand>>() >= CACHE_LINE);
+        assert_eq!(
+            size_of::<Worker<Searcher<Ladder>, WyRand>>() % CACHE_LINE,
+            0
+        );
 
         let pool = seeded(4, &Ladder::default());
-        let stride = size_of::<Worker<Ladder, WyRand>>();
+        let stride = size_of::<Worker<Searcher<Ladder>, WyRand>>();
         let base = pool.workers.as_ptr() as usize;
         assert_eq!(base % CACHE_LINE, 0, "the pool itself is not line-aligned");
         for i in 1..pool.workers.len() {

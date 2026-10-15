@@ -95,12 +95,19 @@
 //!   against a budget that large the answer is always yes.
 //! * **Tree reuse** across moves, and root parallelism behind the `parallel`
 //!   feature.
+//! * **Transpositions.** Implement [`Transposition`] and search with
+//!   [`GraphSearcher`], and every route into a position reads and grows one
+//!   node: a game whose moves commute searches each position once instead of
+//!   once per order of play. A separate searcher, so a game that does not opt in
+//!   pays nothing; where nothing merges it searches exactly as [`Searcher`]
+//!   does. `TRANSPOSITIONS.md` has the design and what is and is not claimed.
 //!
 //! # Allocation
 //!
 //! A steady-state iteration allocates nothing but tree growth. Determinization
 //! writes into one scratch state; move generation fills one reused buffer; each
-//! `Choice` is stored once per edge.
+//! `Choice` is stored once per edge. The same holds for [`GraphSearcher`], whose
+//! growth is the graph's.
 
 #![warn(missing_docs)]
 
@@ -108,6 +115,7 @@ mod budget;
 mod duct;
 mod early_stop;
 mod game;
+mod graph;
 mod node;
 mod rank;
 mod search;
@@ -123,10 +131,11 @@ pub use rand_core;
 
 pub use game::{
     ChoicesOnRevisit, Game, JointChoices, PlayerSet, PlayerSetIter, Rewards, SimultaneousPolicy,
-    Status,
+    Status, Transposition,
 };
+pub use graph::{Graph, GraphEdge, GraphNode, GraphSearcher};
 pub use node::{Edge, Marginals, Node, NodeKind};
 pub use search::{Config, RootPolicy, SearchResult, Searcher, SimultaneousConfig, StopReason};
 
 #[cfg(feature = "parallel")]
-pub use parallel::RootParallel;
+pub use parallel::{GraphRootParallel, RootParallel};
