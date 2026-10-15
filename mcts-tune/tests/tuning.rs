@@ -756,7 +756,7 @@ fn round_robin_scores_average_to_a_half() {
         &candidates,
         &inverted().to_genes(),
         &Evaluation {
-            games: 4,
+            games: 12,
             seed: 11,
             threads: 3,
             opponents: Opponents::RoundRobin,
@@ -789,7 +789,7 @@ fn round_robin_ranks_the_better_candidate_higher() {
         &candidates,
         &inverted().to_genes(),
         &Evaluation {
-            games: 6,
+            games: 12,
             seed: 4,
             threads: 2,
             opponents: Opponents::RoundRobin,
@@ -806,23 +806,24 @@ fn round_robin_ranks_the_better_candidate_higher() {
 /// Identical candidates cannot be told apart, and the seat swap is what
 /// guarantees it: without it whichever sat first would collect the first-move
 /// advantage and the optimizer would chase a difference that is not there.
+/// Six games over two opponents is three a pairing, which cannot split evenly
+/// between the seats, so this also covers the share rounding up to four.
 #[test]
 fn identical_candidates_tie_in_a_round_robin() {
     let table = arena(inverted());
-    let twins = vec![truthful().to_genes(), truthful().to_genes()];
+    let triplets = vec![truthful().to_genes(); 3];
     let scores = evaluate(
         &table,
-        &twins,
+        &triplets,
         &inverted().to_genes(),
         &Evaluation {
-            games: 8,
+            games: 6,
             seed: 21,
             threads: 2,
             opponents: Opponents::RoundRobin,
         },
     );
-    assert_eq!(scores[0], 0.5);
-    assert_eq!(scores[1], 0.5);
+    assert_eq!(scores, vec![0.5; 3]);
 }
 
 #[test]
@@ -838,7 +839,7 @@ fn round_robin_is_independent_of_thread_count() {
         .to_genes(),
     ];
     let plan = |threads| Evaluation {
-        games: 4,
+        games: 8,
         seed: 6,
         threads,
         opponents: Opponents::RoundRobin,
@@ -870,7 +871,7 @@ fn a_round_robin_run_reports_its_latest_generation() {
         &TuneConfig {
             generations: 4,
             evaluation: Evaluation {
-                games: 4,
+                games: 12,
                 seed: 8,
                 threads: 2,
                 opponents: Opponents::RoundRobin,
@@ -888,10 +889,10 @@ fn a_round_robin_run_reports_its_latest_generation() {
     );
 }
 
-/// The reported game count has to be the games actually played. `games` is per
-/// pairing, and there are `n choose 2` pairings, so using the baseline formula
-/// would under-report a round robin by more than threefold at eleven
-/// candidates — and the cost of a run is sized from this number.
+/// `games` is the evidence behind each candidate whoever it plays, so a round
+/// robin shares it out over the opponents instead of playing all of it against
+/// each one. The reported count has to be the games actually played, since the
+/// cost of a run is sized from it.
 #[test]
 fn a_round_robin_generation_costs_what_it_claims() {
     let table = arena(inverted());
@@ -909,7 +910,7 @@ fn a_round_robin_generation_costs_what_it_claims() {
         &TuneConfig {
             generations: 2,
             evaluation: Evaluation {
-                games: 4,
+                games: 12,
                 seed: 8,
                 threads: 2,
                 opponents: Opponents::RoundRobin,
@@ -921,6 +922,24 @@ fn a_round_robin_generation_costs_what_it_claims() {
     )
     .expect("a fresh run cannot fail to resume");
 
-    // 4 choose 2 pairings, 4 games each, over 2 generations.
+    // 4 choose 2 pairings, 12 / 3 = 4 games each, over 2 generations.
     assert_eq!(report.games, 2 * 6 * 4);
+}
+
+/// A share that does not divide evenly rounds up, so a candidate is never
+/// measured on fewer games than asked for.
+#[test]
+fn a_round_robin_rounds_each_pairing_up_to_an_even_share() {
+    let plan = Evaluation {
+        games: 400,
+        seed: 0,
+        threads: 1,
+        opponents: Opponents::RoundRobin,
+    };
+    // 400 over 10 opponents is exactly 40 a pairing.
+    assert_eq!(plan.games_per_candidate(11), 400);
+    assert_eq!(plan.games_per_generation(11), 55 * 40);
+    // Over 11 it is 36.4, which rounds up to 38.
+    assert_eq!(plan.games_per_candidate(12), 11 * 38);
+    assert_eq!(plan.games_per_generation(12), 66 * 38);
 }

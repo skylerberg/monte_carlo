@@ -220,8 +220,9 @@ they all face, which is not the same as being strong.
 
 `Opponents::RoundRobin` plays every candidate against every other. The field
 improves with the population, so there is no ceiling and no fixed opponent to
-specialise against. It is also cheaper than it looks — each game scores two
-candidates, so at equal cost every candidate is measured on twice as many games.
+specialise against. It is also cheaper — each game scores two candidates, so a
+generation plays half the games a baseline needs for the same evidence per
+candidate.
 What it costs is the absolute scale: scores are zero sum within the field, the
 population mean is 0.5 in every generation by construction, and a 0.62 late in a
 run was earned against much stronger opposition than a 0.62 early on. Progress

@@ -164,9 +164,9 @@ pub enum Opponents {
     /// be read from the fitness column; measure a generation's output against
     /// fixed weights separately to see it.
     ///
-    /// It is more efficient than it looks. Every game scores *two* candidates
-    /// rather than one, so at equal cost each candidate is measured on twice as
-    /// many games as it would be against a baseline.
+    /// It is also cheaper. Every game scores *two* candidates rather than one,
+    /// so a generation plays half the games a baseline needs for the same
+    /// evidence per candidate.
     ///
     /// The risk it carries is cycling: with three strategies where each beats
     /// one of the others, a population can chase itself in circles and improve
@@ -183,9 +183,9 @@ pub struct Evaluation {
     /// noise. Halve it and you need four times as many generations to make the
     /// same progress, which is a bad trade well before 200.
     ///
-    /// Under [`Opponents::RoundRobin`] this counts games per *pairing*, so each
-    /// candidate is measured on `games * (candidates - 1)` of them and a
-    /// generation costs `games * candidates * (candidates - 1) / 2` in total.
+    /// Under [`Opponents::RoundRobin`] they are shared out over a candidate's
+    /// opponents rather than played against each one, so each pairing plays a
+    /// fraction of them; see [`Evaluation::games_per_candidate`].
     pub games: usize,
     /// Base seed for the shared game seeds. Changing it between generations
     /// trades a little variance reduction for protection against a candidate
@@ -193,6 +193,40 @@ pub struct Evaluation {
     pub seed: u64,
     pub threads: usize,
     pub opponents: Opponents,
+}
+
+impl Evaluation {
+    /// Games behind each candidate's win rate in a generation of `candidates`:
+    /// [`Evaluation::games`], rounded up under a round robin to give every
+    /// pairing the same even share.
+    pub fn games_per_candidate(&self, candidates: usize) -> usize {
+        match self.opponents {
+            Opponents::Baseline => self.games,
+            Opponents::RoundRobin => {
+                self.games_per_pairing(candidates) * candidates.saturating_sub(1)
+            }
+        }
+    }
+
+    /// Games a generation of `candidates` plays, which is what a run costs.
+    pub fn games_per_generation(&self, candidates: usize) -> usize {
+        match self.opponents {
+            Opponents::Baseline => candidates * self.games,
+            Opponents::RoundRobin => {
+                candidates * candidates.saturating_sub(1) / 2 * self.games_per_pairing(candidates)
+            }
+        }
+    }
+
+    /// Even, so that every pairing splits its games equally between the seats.
+    /// An odd share would give the lower-indexed candidate of every pairing an
+    /// extra game in the second seat, and a seat advantage would then rank
+    /// candidates by index.
+    fn games_per_pairing(&self, candidates: usize) -> usize {
+        self.games
+            .div_ceil(candidates.saturating_sub(1).max(1))
+            .next_multiple_of(2)
+    }
 }
 
 /// Win rate for each candidate, on shared randomness.
@@ -326,8 +360,9 @@ where
         .flat_map(|left| ((left + 1)..contexts.len()).map(move |right| (left, right)))
         .collect();
 
-    let half = plan.games / 2;
-    let total = pairs.len() * plan.games;
+    let games = plan.games_per_pairing(contexts.len());
+    let half = games / 2;
+    let total = pairs.len() * games;
     let next = AtomicUsize::new(0);
     let (next, contexts, pairs) = (&next, &contexts, &pairs);
 
@@ -341,8 +376,8 @@ where
                         if job >= total {
                             return local;
                         }
-                        let (left, right) = pairs[job / plan.games];
-                        let round = job % plan.games;
+                        let (left, right) = pairs[job / games];
+                        let round = job % games;
 
                         // Which of the two sits first flips at the halfway
                         // point, exactly as it does against a baseline.
@@ -377,6 +412,6 @@ where
             })
     });
 
-    let played = (contexts.len() - 1) * plan.games;
+    let played = plan.games_per_candidate(contexts.len());
     sums.into_iter().map(|sum| sum / played as f64).collect()
 }
