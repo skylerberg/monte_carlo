@@ -173,15 +173,7 @@ where
         };
 
         let fitness = evaluate(game, &candidates, &baseline, &plan);
-        games += match plan.opponents {
-            Opponents::Baseline => candidates.len() * plan.games,
-            // Every unordered pair plays, so the count is the pairings and not
-            // the candidates. Reporting the baseline figure here would have a
-            // round robin claim less than a third of the games it actually
-            // plays at eleven candidates, and the cost of a run is sized from
-            // this number.
-            Opponents::RoundRobin => candidates.len() * (candidates.len() - 1) / 2 * plan.games,
-        };
+        games += plan.games_per_generation(candidates.len());
         optimizer.tell(&candidates, &fitness);
 
         let elapsed = started.elapsed();
