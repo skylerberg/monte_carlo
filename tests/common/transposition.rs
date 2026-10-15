@@ -430,3 +430,83 @@ impl Transposition for LeakyKey {
         Some((self.moves, self.hidden))
     }
 }
+
+/// Three players, and after every move a die decides who moves next, so one
+/// line of play reaches a different player to act on different iterations. A
+/// tree child keeps the player it was first stamped for; a graph link keeps the
+/// successor it first resolved to. Neither is a broken key, and the two must
+/// agree.
+#[derive(Clone)]
+pub struct ChanceTurns {
+    to_move: u8,
+    ply: u32,
+    scores: [u32; 3],
+}
+
+impl ChanceTurns {
+    const PLIES: u32 = 4;
+
+    pub fn new() -> Self {
+        Self {
+            to_move: 0,
+            ply: 0,
+            scores: [0; 3],
+        }
+    }
+
+    pub fn to_move(&self) -> u8 {
+        self.to_move
+    }
+
+    fn payoffs(&self) -> [f64; 3] {
+        self.scores
+            .map(|score| f64::from(score) / f64::from(2 * Self::PLIES))
+    }
+}
+
+impl Game for ChanceTurns {
+    type Choice = u8;
+    type Rewards = [f64; 3];
+    type Context = ();
+    type Side = ();
+
+    fn status(&self, _: &()) -> Status<[f64; 3]> {
+        if self.ply >= Self::PLIES {
+            Status::Terminal(self.payoffs())
+        } else {
+            Status::Active {
+                player: self.to_move,
+            }
+        }
+    }
+
+    fn choices_into(&self, _: &(), out: &mut Vec<u8>) {
+        out.extend([0, 1, 2]);
+    }
+
+    /// The mover keeps `choice` points and hands the rest of two to the next
+    /// seat, so every player's reward turns on who happened to move.
+    fn apply_choice<R: Rng + ?Sized>(&mut self, _: &(), choice: &u8, rng: &mut R) {
+        let mover = usize::from(self.to_move);
+        self.scores[mover] += u32::from(*choice);
+        self.scores[(mover + 1) % 3] += 2 - u32::from(*choice);
+        self.ply += 1;
+        self.to_move = (rng.next_u64() % 3) as u8;
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, ctx: &(), rng: &mut R) -> [f64; 3] {
+        while self.ply < Self::PLIES {
+            let choice = (rng.next_u64() % 3) as u8;
+            self.apply_choice(ctx, &choice, rng);
+        }
+        self.payoffs()
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &(), _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}

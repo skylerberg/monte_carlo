@@ -181,6 +181,12 @@ Every later traversal of the link lands in the same vertex. A determinization
 or chance event may produce a different *state* on the way; the contract (§6)
 is that it cannot produce a different *position*.
 
+Nor can it change the vertex's mover, which was fixed when the link resolved.
+Where the player choosing the link varies between visits, because chance or
+hidden information decides whose turn it is, the successor keeps accumulating
+for the player it was resolved for. A tree child keeps the player it was first
+stamped for in the same way, so this is not taken as a broken key.
+
 ### 5.4 Repetition
 
 A tree cannot repeat; a graph can. Each iteration takes a fresh stamp, and

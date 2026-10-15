@@ -1072,13 +1072,6 @@ fn run_iteration<G: Transposition, R: Rng + ?Sized>(
             (target, fresh)
         } else {
             let target = &graph.vertices[resolved as usize];
-            debug_assert!(
-                target.player == player,
-                "mcts: a link was taken by player {player} into a position merged for \
-                 player {}. Links resolve by the mover's key, so this means the position \
-                 to act changed between visits.",
-                target.player
-            );
             debug_assert_key_holds(target, state, ctx);
             (resolved, target.visits == 0)
         };

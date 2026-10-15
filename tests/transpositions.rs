@@ -221,6 +221,42 @@ fn re_rooting_a_graph_that_never_merges_agrees_with_the_tree() {
     }
 }
 
+/// Chance picks who moves next, so a link's successor can have a different
+/// player to act than when it was resolved. The tree carries on with the player
+/// a child was stamped for, and so must the graph: through a search, and
+/// through a re-root into a search for whoever the die then chose.
+#[test]
+fn a_mover_chosen_by_chance_searches_exactly_as_the_tree() {
+    for seed in [1u64, 7, 21] {
+        for cfg in fingerprint_configs() {
+            both_wrappers(&ChanceTurns::new(), 0, &cfg, seed);
+
+            let mut tree_game = ChanceTurns::new();
+            let mut wrapped = PathKeyed::new(tree_game.clone());
+            let mut tree = Searcher::new(&tree_game);
+            let mut graph = GraphSearcher::new(&wrapped);
+            let mut a_rng = WyRand::seed_from_u64(seed);
+            let mut b_rng = WyRand::seed_from_u64(seed);
+            for _ in 0..2 {
+                let perspective = tree_game.to_move();
+                let a = tree.search(&tree_game, &(), perspective, &cfg, None, &mut a_rng);
+                let b = graph.search(&wrapped, &(), perspective, &cfg, None, &mut b_rng);
+                assert_same_result(&a, &b);
+                assert_same_shape(
+                    tree.tree().expect("a tree"),
+                    graph.graph().expect("a graph").root(),
+                );
+                tree_game.apply_choice(&(), &a.choice, &mut a_rng);
+                wrapped.apply_choice(&(), &b.choice, &mut b_rng);
+                assert_eq!(
+                    tree.reuse_subtree(&a.choice),
+                    graph.reuse_subtree(&b.choice)
+                );
+            }
+        }
+    }
+}
+
 fn simultaneous_configs() -> Vec<Config> {
     let mut configs = Vec::new();
     for iterations in [10u32, 300, 3000] {
