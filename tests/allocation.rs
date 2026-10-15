@@ -31,9 +31,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{AlwaysWin, Rps, VariableRps};
+use common::{AlwaysWin, Rps, Untransposed, VariableRps};
 use mcts::rand_core::{Rng, SeedableRng};
-use mcts::{Config, Game, Searcher, Status};
+use mcts::{Config, Game, GraphSearcher, Searcher, Status, Transposition};
 use wyrand::WyRand;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -168,6 +168,17 @@ impl Game for WideLine {
     }
 }
 
+/// Every non-matching second pick ends the game in the same position, so the
+/// 576 leaves of the tree are 48 positions here: the graph search's merge table
+/// is exercised at every second-ply link, on top of the hash index above it.
+impl Transposition for WideLine {
+    type Key = (u8, u8);
+
+    fn transposition_key(&self, _: &()) -> Option<(u8, u8)> {
+        Some((self.ply, self.first))
+    }
+}
+
 fn config(iterations: u32) -> Config {
     Config {
         iterations,
@@ -247,6 +258,61 @@ fn assert_saturates<G: Game<Context = ()>>(
     );
 }
 
+/// [`allocations_for`] through a [`GraphSearcher`], reporting the graph's
+/// position count.
+fn graph_allocations_for<G: Transposition<Context = ()>>(
+    game: &G,
+    perspective: u8,
+    iterations: u32,
+) -> (usize, usize) {
+    let mut searcher = GraphSearcher::new(game);
+    let mut rng = WyRand::seed_from_u64(7);
+    let cfg = config(iterations);
+
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    MEASURING.with(|m| m.set(true));
+    searcher.search(game, &(), perspective, &cfg, None, &mut rng);
+    MEASURING.with(|m| m.set(false));
+    let after = ALLOCATIONS.load(Ordering::Relaxed);
+
+    let nodes = searcher
+        .graph()
+        .expect("a search leaves a graph")
+        .node_count();
+    (after - before, nodes)
+}
+
+/// [`assert_saturates`] for a graph search: `nodes` is the number of
+/// *positions* in the whole game, which is what a saturated graph holds.
+fn assert_graph_saturates<G: Transposition<Context = ()>>(
+    name: &str,
+    game: &G,
+    perspective: u8,
+    nodes: usize,
+    (small, large): (u32, u32),
+) {
+    let (few, few_nodes) = graph_allocations_for(game, perspective, small);
+    let (many, many_nodes) = graph_allocations_for(game, perspective, large);
+    assert_eq!(
+        (few_nodes, many_nodes),
+        (nodes, nodes),
+        "{name}: the graph holds {few_nodes} positions at {small} iterations and \
+         {many_nodes} at {large}, not the {nodes} the whole game has."
+    );
+    assert!(
+        few > 0,
+        "{name}: the search allocated nothing even once, so this measured no search at all"
+    );
+    assert_eq!(
+        few,
+        many,
+        "{name}: {small} iterations allocated {few} times and {large} allocated {many}. \
+         A saturated graph has nothing left to grow, so the extra {} iterations should \
+         have allocated nothing at all — the search is allocating per iteration.",
+        large - small
+    );
+}
+
 #[test]
 fn a_saturated_search_stops_allocating() {
     // Three choices, three plies, every leaf terminal: 1 + 3 + 9 + 27 nodes,
@@ -279,6 +345,41 @@ fn a_saturated_search_stops_allocating() {
     assert_saturates(
         "variable_rps",
         &VariableRps::default(),
+        0,
+        10,
+        (2_000, 10_000),
+    );
+
+    // The same claim for the graph search. One position per ply, so every
+    // route merges: four positions however long the search runs.
+    assert_graph_saturates(
+        "graph_always_win",
+        &AlwaysWin { ply: 0 },
+        1,
+        4,
+        (2_000, 10_000),
+    );
+
+    // Merging at the second ply, behind the hash index at both: 1 + 24 + 48.
+    assert_graph_saturates(
+        "graph_wide_line",
+        &WideLine { ply: 0, first: 0 },
+        0,
+        1 + WIDE + 2 * WIDE,
+        (4_000, 20_000),
+    );
+
+    // A graph that never merges grows exactly the tree's positions.
+    assert_graph_saturates(
+        "graph_untransposed_wide_line",
+        &Untransposed(WideLine { ply: 0, first: 0 }),
+        0,
+        1 + WIDE + WIDE * WIDE,
+        (4_000, 20_000),
+    );
+    assert_graph_saturates(
+        "graph_variable_rps",
+        &Untransposed(VariableRps::default()),
         0,
         10,
         (2_000, 10_000),

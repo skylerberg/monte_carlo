@@ -11,7 +11,7 @@ use crate::budget::Deadline;
 use crate::duct;
 use crate::early_stop;
 use crate::game::{Game, JointChoices, PlayerSet, Rewards, SimultaneousPolicy, Status};
-use crate::node::{JointKey, Node};
+use crate::node::{JointKey, Node, Simul};
 use crate::rank::{leader_of, Candidate};
 use crate::select::{select, ExplorationCount};
 use crate::util::below;
@@ -19,7 +19,7 @@ use crate::util::below;
 use crate::util::hash_of;
 
 /// How often the wall clock is consulted, in iterations.
-const DEADLINE_CHECK_MASK: u32 = 31;
+pub(crate) const DEADLINE_CHECK_MASK: u32 = 31;
 
 /// How the returned move is read off a simultaneous root. Ignored at a
 /// sequential root, which always answers with its leading child.
@@ -1025,7 +1025,7 @@ fn root_answer<C>(root: &Node<C>, legal: &[bool]) -> Option<usize> {
 /// A root decision, as much of one as `Status` carries.
 #[cfg(debug_assertions)]
 #[derive(PartialEq, Eq, Debug)]
-enum RootDecision {
+pub(crate) enum RootDecision {
     Active(u8),
     Simultaneous(PlayerSet),
     Terminal,
@@ -1062,7 +1062,7 @@ fn root_choices_into<G: Game>(
 /// cost more than the enumeration it exists to police — and would break the
 /// saturated-search allocation guarantee in every debug build.
 #[cfg(debug_assertions)]
-struct RootCheck<C> {
+pub(crate) struct RootCheck<C> {
     before: Vec<C>,
     after: Vec<C>,
     /// Positions in `before`, built only when the lists disagree on order. An
@@ -1073,7 +1073,7 @@ struct RootCheck<C> {
 
 #[cfg(debug_assertions)]
 impl<C: Eq + Hash> RootCheck<C> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         RootCheck {
             before: Vec::new(),
             after: Vec::new(),
@@ -1082,7 +1082,7 @@ impl<C: Eq + Hash> RootCheck<C> {
     }
 
     /// The root decision this determinization presents, and its answer list.
-    fn read<G: Game<Choice = C>>(
+    pub(crate) fn read<G: Game<Choice = C>>(
         &mut self,
         state: &G,
         ctx: &G::Context,
@@ -1113,7 +1113,7 @@ impl<C: Eq + Hash> RootCheck<C> {
     /// resolving an opponent's hidden decision produces, and checking one
     /// determinization would clear it whenever the first world sampled happens
     /// to behave.
-    fn check<G: Game<Choice = C>>(
+    pub(crate) fn check<G: Game<Choice = C>>(
         &mut self,
         state: &G,
         ctx: &G::Context,
@@ -1327,6 +1327,71 @@ fn extract_marginal<G: Game, R: Rng + ?Sized>(
         state.choices_for_into(ctx, perspective, &mut scratch.choices);
         let k = below(rng, scratch.choices.len() as u64) as usize;
         (scratch.choices[k].clone(), 0, 0.0)
+    })
+}
+
+/// [`extract_marginal`] over a root's marginal block rather than a tree root,
+/// for a graph's root. A copy rather than the shared body, because changing the
+/// original's signature changed the tree's machine code; `tests/transpositions.rs`
+/// holds the two to identical answers.
+///
+/// The perspective player's own action at a simultaneous root, with that
+/// marginal's statistics.
+///
+/// Reads the mask `search` has just refreshed rather than building its own, so
+/// the answer is drawn from exactly the candidates the early-termination proof
+/// ranked. Two constructions of the same object is how the sequential root came
+/// to be extracted unfiltered while this one was not. A mask of the wrong length
+/// describes some other candidate set and admits nothing.
+///
+/// Never an argmax over joint successors under either policy: the perspective
+/// player's action appears in one joint child per opponent action, so an argmax
+/// there picks the best *pair* — the classic optimistic bug that makes a
+/// decoupled agent assume the opponent plays along.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn extract_marginal_from<G: Game, R: Rng + ?Sized>(
+    root: Option<&Simul<G::Choice>>,
+    state: &G,
+    ctx: &G::Context,
+    legal: &[bool],
+    choices: &mut Vec<G::Choice>,
+    perspective: u8,
+    cfg: &Config,
+    rng: &mut R,
+) -> (G::Choice, u32, f64) {
+    let picked = root.and_then(|simul| {
+        let slot = simul
+            .players
+            .slot_of(perspective)
+            .expect("the preamble asserted membership");
+        if legal.len() != simul.slot_len(slot) {
+            return None;
+        }
+        match cfg.simultaneous.root_policy {
+            RootPolicy::Sampled => {
+                duct::sample_root_arm(simul, slot, legal, G::SIMULTANEOUS_POLICY, rng)
+            }
+            RootPolicy::MostVisited => duct::best_arm(simul, slot, legal, G::SIMULTANEOUS_POLICY),
+        }
+        .map(|arm| {
+            let marginals = simul.marginals(slot);
+            (
+                marginals.choice(arm).clone(),
+                marginals.visits(arm),
+                marginals.mean_reward(arm),
+            )
+        })
+    });
+
+    picked.unwrap_or_else(|| {
+        // No arm legal here, or no iteration completed. Uniform over this
+        // player's own list — `choices_into` may name another player's actions
+        // at an asymmetric simultaneous state, and a cached mask leaves
+        // `choices` describing whatever last filled it.
+        choices.clear();
+        state.choices_for_into(ctx, perspective, choices);
+        let k = below(rng, choices.len() as u64) as usize;
+        (choices[k].clone(), 0, 0.0)
     })
 }
 
@@ -1652,7 +1717,26 @@ fn debug_assert_arms_match_choices<G: Game>(
     if !cfg!(debug_assertions) {
         return;
     }
-    let simul = node.simul().expect("a node with arms is simultaneous");
+    debug_assert_simul_arms_match_choices::<G>(
+        node.simul().expect("a node with arms is simultaneous"),
+        players,
+        state,
+        ctx,
+        choices,
+    );
+}
+
+/// [`debug_assert_arms_match_choices`] on the marginal block itself.
+pub(crate) fn debug_assert_simul_arms_match_choices<G: Game>(
+    simul: &Simul<G::Choice>,
+    players: PlayerSet,
+    state: &G,
+    ctx: &G::Context,
+    choices: &mut Vec<G::Choice>,
+) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     for (slot, player) in players.iter().enumerate() {
         choices.clear();
         state.choices_for_into(ctx, player, choices);
