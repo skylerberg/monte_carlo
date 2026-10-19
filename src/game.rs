@@ -514,13 +514,17 @@ pub trait Game: Sized {
     fn status(&self, ctx: &Self::Context) -> Status<Self::Rewards>;
 
     /// Fill `out` with the legal choices. `out` is cleared by the caller and
-    /// reused across iterations, so this should not allocate in steady state.
+    /// reused across iterations, so filling it needs no allocation of its own
+    /// in steady state. The choices themselves are another matter: clearing
+    /// drops them, so a `Choice` that owns heap data allocates once per legal
+    /// choice on every call — every visit, under the default
+    /// [`ChoicesOnRevisit`] — where a `Copy` choice such as an index allocates
+    /// nothing.
     fn choices_into(&self, ctx: &Self::Context, out: &mut Vec<Self::Choice>);
 
     /// Fill `out` with `player`'s own legal choices at a
     /// [`Status::Simultaneous`] state. Same contract as [`Game::choices_into`]:
-    /// `out` is cleared by the caller and reused across calls and iterations,
-    /// so this must not allocate in steady state.
+    /// `out` is cleared by the caller and reused across calls and iterations.
     ///
     /// The default assumes every participant chooses from the same list, which
     /// is true of most simultaneous games — bidding, simultaneous card

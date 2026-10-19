@@ -409,8 +409,7 @@ pub trait Game: Sized {
 
     /// Fill `out` with `player`'s own legal choices at a [`Status::Simultaneous`]
     /// state. Same contract as [`Game::choices_into`]: `out` is cleared by the caller
-    /// and reused across calls and iterations, so this must not allocate in steady
-    /// state.
+    /// and reused across calls and iterations.
     ///
     /// The default assumes every participant chooses from the same list, which is
     /// true of most simultaneous games — bidding, simultaneous card selection,
@@ -1728,8 +1727,8 @@ game where one player moves twice has no turn order to read it off.
 successor state, so it can only describe a joint child, and selection scores arms.
 This is a silent behavioural hole for a game that tunes progressive bias and then adds
 a simultaneous node, so it is documented on both `Game::heuristic_bias` and
-`Config::progressive_bias_weight`. `ucb_raw`'s bias term is therefore not used by
-`select_marginal`, which is one reason `select_marginal` does not call it.
+`Config::progressive_bias_weight`. `select_duct` therefore passes `ucb_raw` a zero
+weight, and regret matching has no UCB term to add it to.
 
 ### 5.6 `Side` and `advance`
 

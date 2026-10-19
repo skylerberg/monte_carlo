@@ -275,12 +275,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one world's data into another world's state and into the caller's answer, with
   nothing to catch it. It is now a stated precondition rather than an
   implementation detail.
+* **`Game::choices_into` no longer promises an allocation-free enumeration it
+  cannot deliver.** The buffer is reused, but clearing it drops every choice, so
+  a `Choice` that owns heap data allocates once per legal choice per call —
+  every visit, under the default `ChoicesOnRevisit`. The doc says so, and
+  `choices_for_into` defers to it rather than repeating the claim.
 
 ### Performance
 
 Behaviour is unchanged by every item here: the sequential fingerprint is
 byte-identical and node counts are bit-identical in every configuration.
 
+* **A zero `progressive_bias_weight` no longer costs a divide per child.**
+  `ucb_raw` computed `bias_weight * heuristic_bias / (1 + visits)` for every
+  child on every selection, and IEEE rules forbid folding that away even for a
+  literal zero, so the default config paid a divide, a multiply and two adds per
+  child for a term that was always zero — at sequential nodes, at `Duct` arms
+  and in `GraphSearcher`. A zero weight now returns before the term. Interleaved
+  against the previous commit on `benches/search.rs`: `revisit/same_everywhere`
+  9.0% faster, `revisit/same_at_root` 4.4%, `tiny`, `narrow` and `wide` 1.5–2.5%.
+  Colori retires 0.1–0.2% fewer instructions per iteration; its rollouts
+  dominate.
 * **A simultaneous node's arm index survives a newly discovered action**, which
   turns expansion from `O(A^2)` into `O(A)` in the arm count. The index's
   payloads were global positions into the flat arm array, so the insert that
