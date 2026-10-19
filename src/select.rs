@@ -43,6 +43,10 @@ impl ExplorationCount {
 /// bandit applied to a different denominator. It passes a zero bias weight
 /// rather than omitting the term — see the comment at that call site for why
 /// the prior has no meaning at a simultaneous node.
+///
+/// A zero weight returns before the bias term rather than zeroing it: IEEE
+/// rules forbid folding `0.0 * h / (1.0 + visits)` or the add, so the term
+/// would otherwise cost a divide per child on every selection.
 #[inline(always)]
 pub(crate) fn ucb_raw(
     cumulative_reward: f64,
@@ -52,9 +56,11 @@ pub(crate) fn ucb_raw(
     bias_weight: f64,
     heuristic_bias: f32,
 ) -> f64 {
-    cumulative_reward / visits
-        + exploration * (ln_total / visits).sqrt()
-        + bias_weight * heuristic_bias as f64 / (1.0 + visits)
+    let value = cumulative_reward / visits + exploration * (ln_total / visits).sqrt();
+    if bias_weight == 0.0 {
+        return value;
+    }
+    value + bias_weight * heuristic_bias as f64 / (1.0 + visits)
 }
 
 #[inline]

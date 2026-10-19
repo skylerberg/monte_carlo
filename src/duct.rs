@@ -233,8 +233,8 @@ fn select_duct<C, R: Rng + ?Sized>(
     // is the same bandit as a child scored against its own availability. The
     // progressive-bias term is passed off rather than omitted: `heuristic_bias`
     // describes a state, so at a simultaneous node it would describe a joint
-    // successor while selection here scores one player's arms. A zero weight
-    // makes the term identically zero and the constant folds away.
+    // successor while selection here scores one player's arms. The literal zero
+    // weight takes `ucb_raw`'s early return, and the branch folds away.
     let score = |a: usize| -> f64 {
         let arm = &simul.arm_stats[a];
         ucb_raw(

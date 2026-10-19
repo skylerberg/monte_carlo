@@ -703,9 +703,12 @@ fn ucb<C, K>(
     bias_weight: f64,
 ) -> f64 {
     let evidence = target.visits as f64;
-    target.cumulative_reward / evidence
-        + exploration * (ln_total / link.visits as f64).sqrt()
-        + bias_weight * target.heuristic_bias as f64 / (1.0 + evidence)
+    let value =
+        target.cumulative_reward / evidence + exploration * (ln_total / link.visits as f64).sqrt();
+    if bias_weight == 0.0 {
+        return value;
+    }
+    value + bias_weight * target.heuristic_bias as f64 / (1.0 + evidence)
 }
 
 /// The link to descend, or `None` if nothing is legal here. The tree's
