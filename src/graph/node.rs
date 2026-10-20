@@ -258,7 +258,7 @@ impl<C: Clone + Eq + Hash, K> Vertex<C, K> {
         is_root: bool,
         choices: &[C],
         threshold: usize,
-        exploration_count: ExplorationCount,
+        choices_fixed: bool,
         avail: &mut Vec<bool>,
         rng: &mut R,
     ) {
@@ -281,7 +281,9 @@ impl<C: Clone + Eq + Hash, K> Vertex<C, K> {
                     legal_links += 1;
                     let link = &mut self.links[k];
                     link.times_available += 1;
-                    if exploration_count == ExplorationCount::TimesAvailable {
+                    if ExplorationCount::of(is_root, choices_fixed)
+                        == ExplorationCount::TimesAvailable
+                    {
                         link.ln_times_available = (link.times_available as f64).ln();
                     }
                     avail[k] = true;
@@ -308,7 +310,8 @@ impl<C: Clone + Eq + Hash, K> Vertex<C, K> {
 
         let every_choice_has_a_link = is_root || unseen <= 1;
         let every_link_is_a_choice = legal_links == self.links.len();
-        self.links_match_choices = every_choice_has_a_link && every_link_is_a_choice;
+        self.links_match_choices =
+            choices_fixed && every_choice_has_a_link && every_link_is_a_choice;
     }
 }
 

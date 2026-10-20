@@ -784,7 +784,8 @@ fn debug_assert_links_match_choices<G: Transposition>(
         .all(|link| choices.contains(&link.choice));
     assert!(
         every_choice_has_a_link && every_link_is_a_choice,
-        "mcts: CHOICES_ON_REVISIT is {:?}, but this visit to a position offers {} choices \
+        "mcts: an earlier visit found this position's choices fixed (Game::choices_fixed, \
+         which defaults to CHOICES_ON_REVISIT = {:?}), but this visit to a position offers {} choices \
          that do not match the {} links an earlier visit left there. The search would \
          have selected among the earlier visit's choices.",
         G::CHOICES_ON_REVISIT,
@@ -868,8 +869,7 @@ fn run_iteration<G: Transposition, R: Rng + ?Sized>(
                 let epoch = vertex.visits;
                 let policy = G::SIMULTANEOUS_POLICY;
                 let is_root = at == root as usize;
-                let choices_already_known =
-                    G::CHOICES_ON_REVISIT.are_same(is_root) && vertex.links_match_choices;
+                let choices_already_known = vertex.links_match_choices;
                 let joint = vertex.ensure_joint(players);
 
                 let mut degenerate = false;
@@ -910,7 +910,9 @@ fn run_iteration<G: Transposition, R: Rng + ?Sized>(
                         }
                         every_arm_is_a_choice &= legal == joint.simul.slot_len(slot);
                     }
-                    graph.vertices[at].links_match_choices = !degenerate && every_arm_is_a_choice;
+                    let fixed = state.choices_fixed(ctx, is_root);
+                    graph.vertices[at].links_match_choices =
+                        fixed && !degenerate && every_arm_is_a_choice;
                 }
                 if degenerate {
                     rewards = G::Rewards::uniform(cfg.min_reward);
@@ -1015,29 +1017,27 @@ fn run_iteration<G: Transposition, R: Rng + ?Sized>(
         };
 
         let is_root = at == root as usize;
-        let exploration_count = if is_root || G::CHOICES_ON_REVISIT.are_same(is_root) {
-            ExplorationCount::ParentVisits
-        } else {
-            ExplorationCount::TimesAvailable
-        };
         let vertex = &mut graph.vertices[at];
-        let choices_already_known =
-            G::CHOICES_ON_REVISIT.are_same(is_root) && vertex.links_match_choices;
-        let available: &[bool] = if choices_already_known {
+        let (available, exploration_count): (&[bool], _) = if vertex.links_match_choices {
             debug_assert_links_match_choices::<G>(vertex, state, ctx, choices);
-            mark_every_link_available(&mut vertex.links, all_available)
+            (
+                mark_every_link_available(&mut vertex.links, all_available),
+                ExplorationCount::ParentVisits,
+            )
         } else {
             choices.clear();
             state.choices_into(ctx, choices);
+            let fixed = state.choices_fixed(ctx, is_root);
+            let exploration_count = ExplorationCount::of(is_root, fixed);
             vertex.expand(
                 is_root,
                 choices,
                 G::CHILD_INDEX_THRESHOLD,
-                exploration_count,
+                fixed,
                 avail,
                 rng,
             );
-            avail
+            (avail, exploration_count)
         };
 
         let picked = select(

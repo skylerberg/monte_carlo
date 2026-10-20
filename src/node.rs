@@ -57,7 +57,9 @@ pub enum NodeKind {
 }
 
 /// A node's [`NodeKind`], and whether its children — or, at a simultaneous
-/// node, its arms — are exactly the choices it was last enumerated with.
+/// node, its arms — are exactly the choices it was last enumerated with, at a
+/// position that said its choices are fixed. Set, it lets a visit skip
+/// enumerating.
 ///
 /// One byte for both because `Node<u8>` fills 64 bytes with no padding to
 /// spare, and a separate `bool` would put every node of such a tree across two
@@ -797,7 +799,7 @@ impl<C: Clone + Eq + Hash> Node<C> {
         choices: &[C],
         player: u8,
         threshold: usize,
-        exploration_count: ExplorationCount,
+        choices_fixed: bool,
         avail: &mut Vec<bool>,
         rng: &mut R,
     ) {
@@ -821,7 +823,9 @@ impl<C: Clone + Eq + Hash> Node<C> {
                     legal_children += 1;
                     let child = &mut self.children[k];
                     child.times_available += 1;
-                    if exploration_count == ExplorationCount::TimesAvailable {
+                    if ExplorationCount::of(is_root, choices_fixed)
+                        == ExplorationCount::TimesAvailable
+                    {
                         child.ln_times_available = (child.times_available as f64).ln();
                     }
                     avail[k] = true;
@@ -848,9 +852,9 @@ impl<C: Clone + Eq + Hash> Node<C> {
 
         let every_choice_has_a_child = is_root || unseen <= 1;
         let every_child_is_a_choice = legal_children == self.children.len();
-        self.kind_and_match = self
-            .kind_and_match
-            .with_edges_match_choices(every_choice_has_a_child && every_child_is_a_choice);
+        self.kind_and_match = self.kind_and_match.with_edges_match_choices(
+            choices_fixed && every_choice_has_a_child && every_child_is_a_choice,
+        );
     }
 
     /// Record this iteration's legal actions for one participant, creating an
@@ -1651,14 +1655,7 @@ mod tests {
 
         let mut root = Node::new_root(0);
         for _ in 0..2 {
-            root.expand(
-                &choices,
-                0,
-                usize::MAX,
-                ExplorationCount::ParentVisits,
-                &mut avail,
-                &mut rng,
-            );
+            root.expand(&choices, 0, usize::MAX, false, &mut avail, &mut rng);
         }
         assert_eq!(root.children.len(), choices.len());
         for child in &root.children {
@@ -1668,14 +1665,7 @@ mod tests {
 
         let mut inner = Node::new(0, NodeKind::Choice, Some(9u16));
         for _ in 0..5 {
-            inner.expand(
-                &choices,
-                0,
-                usize::MAX,
-                ExplorationCount::TimesAvailable,
-                &mut avail,
-                &mut rng,
-            );
+            inner.expand(&choices, 0, usize::MAX, false, &mut avail, &mut rng);
         }
         let opened = &inner.children[0];
         assert!(opened.times_available > 1);

@@ -1465,9 +1465,7 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                 // Marginal expansion is full on every visit, root or not; only
                 // the joint successors are lazy. See `Node::expand_marginals`.
                 let mut degenerate = false;
-                let choices_already_known =
-                    G::CHOICES_ON_REVISIT.are_same_at(node) && node.arms_match_choices();
-                if choices_already_known {
+                if node.arms_match_choices() {
                     debug_assert_arms_match_choices::<G>(node, players, state, ctx, choices);
                     node.mark_every_arm_available(policy);
                 } else {
@@ -1495,7 +1493,8 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
                             .slot_len(slot);
                         every_arm_is_a_choice &= legal == held;
                     }
-                    node.set_arms_match_choices(!degenerate && every_arm_is_a_choice);
+                    let fixed = state.choices_fixed(ctx, node.is_root());
+                    node.set_arms_match_choices(fixed && !degenerate && every_arm_is_a_choice);
                 }
                 if degenerate {
                     rewards = G::Rewards::uniform(cfg.min_reward);
@@ -1565,24 +1564,19 @@ fn run_iteration<G: Game, R: Rng + ?Sized>(
             }
         };
 
-        let exploration_count = ExplorationCount::at::<G>(node);
-        let choices_already_known =
-            G::CHOICES_ON_REVISIT.are_same_at(node) && node.children_match_choices();
-        let available: &[bool] = if choices_already_known {
+        let (available, exploration_count): (&[bool], _) = if node.children_match_choices() {
             debug_assert_children_match_choices::<G>(node, state, ctx, choices);
-            mark_every_child_available(node, all_available)
+            (
+                mark_every_child_available(node, all_available),
+                ExplorationCount::ParentVisits,
+            )
         } else {
             choices.clear();
             state.choices_into(ctx, choices);
-            node.expand(
-                choices,
-                player,
-                G::CHILD_INDEX_THRESHOLD,
-                exploration_count,
-                avail,
-                rng,
-            );
-            avail
+            let fixed = state.choices_fixed(ctx, node.is_root());
+            let exploration_count = ExplorationCount::of(node.is_root(), fixed);
+            node.expand(choices, player, G::CHILD_INDEX_THRESHOLD, fixed, avail, rng);
+            (avail, exploration_count)
         };
 
         let picked = select(
@@ -1698,7 +1692,8 @@ fn debug_assert_children_match_choices<G: Game>(
     });
     assert!(
         every_choice_has_a_child && every_child_is_a_choice,
-        "mcts: CHOICES_ON_REVISIT is {:?}, but this visit to a node offers {} choices that \
+        "mcts: an earlier visit found this position's choices fixed (Game::choices_fixed, \
+         which defaults to CHOICES_ON_REVISIT = {:?}), but this visit to a node offers {} choices that \
          do not match the {} children an earlier visit left there. The search would have \
          selected among the earlier visit's choices.",
         G::CHOICES_ON_REVISIT,
@@ -1749,7 +1744,8 @@ pub(crate) fn debug_assert_simul_arms_match_choices<G: Game>(
             .all(|arm| choices.contains(arm));
         assert!(
             every_choice_has_an_arm && every_arm_is_a_choice,
-            "mcts: CHOICES_ON_REVISIT is {:?}, but this visit offers player {player} {} \
+            "mcts: an earlier visit found this position's choices fixed (Game::choices_fixed, \
+         which defaults to CHOICES_ON_REVISIT = {:?}), but this visit offers player {player} {} \
              choices that do not match the {} arms an earlier visit left there. The search \
              would have selected among the earlier visit's choices.",
             G::CHOICES_ON_REVISIT,

@@ -1,4 +1,3 @@
-use crate::game::Game;
 use crate::node::Node;
 
 /// The count a child's exploration term is measured against.
@@ -22,8 +21,8 @@ impl ExplorationCount {
     /// term is what apportions the budget between children the root offers on
     /// every iteration anyway.
     #[inline(always)]
-    pub(crate) fn at<G: Game>(node: &Node<G::Choice>) -> Self {
-        if node.is_root() || G::CHOICES_ON_REVISIT.are_same_at(node) {
+    pub(crate) fn of(at_root: bool, choices_fixed: bool) -> Self {
+        if at_root || choices_fixed {
             Self::ParentVisits
         } else {
             Self::TimesAvailable

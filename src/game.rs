@@ -2,8 +2,6 @@ use core::hash::Hash;
 
 use rand_core::Rng;
 
-use crate::node::Node;
-
 /// Per-player payoffs, produced once per iteration at the leaf.
 ///
 /// Implemented for `[f64; N]`, which is what both known consumers use. Backup is
@@ -338,6 +336,9 @@ impl<C> core::ops::Index<usize> for JointChoices<'_, C> {
 /// lets the search skip, and panic on a mismatch, so run your integration tests
 /// in debug before trusting a claim in release.
 ///
+/// This is one answer for the whole game. Where the answer depends on the
+/// position, override [`Game::choices_fixed`], whose default reads this.
+///
 /// An associated const on [`Game`] rather than a `Config` field, like
 /// [`SimultaneousPolicy`]: it is a fact about the game, and a const folds the
 /// branch it does not take out of the descent.
@@ -366,12 +367,8 @@ pub enum ChoicesOnRevisit {
 }
 
 impl ChoicesOnRevisit {
-    #[inline(always)]
-    pub(crate) fn are_same_at<C>(self, node: &Node<C>) -> bool {
-        self.are_same(node.is_root())
-    }
-
-    /// [`ChoicesOnRevisit::are_same_at`] for a node that is or is not the root.
+    /// Whether a node that is or is not the root offers the same choices on
+    /// every visit.
     #[inline(always)]
     pub(crate) fn are_same(self, at_root: bool) -> bool {
         match self {
@@ -534,6 +531,22 @@ pub trait Game: Sized {
     fn choices_for_into(&self, ctx: &Self::Context, player: u8, out: &mut Vec<Self::Choice>) {
         let _ = player;
         self.choices_into(ctx, out)
+    }
+
+    /// Whether this position offers the same choices on every visit to its
+    /// node, which is where the search may stop asking for them.
+    ///
+    /// The default is [`Game::CHOICES_ON_REVISIT`], one answer for the whole
+    /// game. Override it when the answer depends on the position: the same
+    /// within a stretch of play every determinization begins identically, and
+    /// different past a hidden draw. It is asked only on visits that enumerate,
+    /// right after [`Game::choices_into`] or [`Game::choices_for_into`], so a
+    /// node whose choices are known costs nothing more. The claim carries the
+    /// same contract and the same debug check as the const.
+    #[inline(always)]
+    fn choices_fixed(&self, ctx: &Self::Context, at_root: bool) -> bool {
+        let _ = ctx;
+        Self::CHOICES_ON_REVISIT.are_same(at_root)
     }
 
     /// Play `choice`. Resolve any chance events with `rng`.
