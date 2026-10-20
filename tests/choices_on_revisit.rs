@@ -534,12 +534,74 @@ fn same_everywhere_enumerates_at_most_once_per_iteration() {
     }
 }
 
+/// [`CountedTree`] claiming fixed choices from ply 3 down and nowhere above,
+/// through [`Game::choices_fixed`] rather than the game-wide const.
+#[derive(Clone, Default)]
+struct FixedFromPly3(CountedTree);
+
+impl Game for FixedFromPly3 {
+    type Choice = u8;
+    type Rewards = [f64; 2];
+    type Context = Cell<u64>;
+    type Side = ();
+
+    fn status(&self, ctx: &Cell<u64>) -> Status<[f64; 2]> {
+        self.0.status(ctx)
+    }
+
+    fn choices_into(&self, ctx: &Cell<u64>, out: &mut Vec<u8>) {
+        self.0.choices_into(ctx, out)
+    }
+
+    fn choices_fixed(&self, _: &Cell<u64>, _: bool) -> bool {
+        self.0.ply >= 3
+    }
+
+    fn apply_choice<R: Rng + ?Sized>(&mut self, ctx: &Cell<u64>, choice: &u8, rng: &mut R) {
+        self.0.apply_choice(ctx, choice, rng)
+    }
+
+    fn rollout<R: Rng + ?Sized>(&mut self, ctx: &Cell<u64>, rng: &mut R) -> [f64; 2] {
+        self.0.rollout(ctx, rng)
+    }
+
+    fn new_buffer(&self) -> Self {
+        self.clone()
+    }
+
+    fn determinize_into<R: Rng + ?Sized>(&self, dest: &mut Self, _: &Cell<u64>, _: u8, _: &mut R) {
+        dest.clone_from(self);
+    }
+}
+
+/// A claim made per position skips only where it is made: above ply 3 every
+/// visit still enumerates, as under `MayChange`, and below it a node is
+/// enumerated only until its children match, as under `SameEverywhere`.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "debug builds re-enumerate every node they skip, to check the claim"
+)]
+fn a_per_position_claim_skips_only_where_it_is_made() {
+    const ITERATIONS: u32 = 2_000;
+    let (may_change, _) = enumerations_over_two_searches(CountedTree::default(), ITERATIONS);
+    let (same_everywhere, _) =
+        enumerations_over_two_searches(ClaimsSameEverywhere(CountedTree::default()), ITERATIONS);
+    let (per_position, _) =
+        enumerations_over_two_searches(FixedFromPly3(CountedTree::default()), ITERATIONS);
+    assert!(
+        same_everywhere < per_position && per_position < may_change,
+        "claiming fixed choices from ply 3 enumerated {per_position} times, which is not \
+         between SameEverywhere's {same_everywhere} and MayChange's {may_change}"
+    );
+}
+
 /// `ChanceLine` draws whether [`EDGE`] is legal at its second ply, so claiming
 /// `SameEverywhere` for it is false, and a debug build is what catches that:
 /// it re-enumerates every node the claim lets it skip.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "CHOICES_ON_REVISIT is SameEverywhere")]
+#[should_panic(expected = "CHOICES_ON_REVISIT = SameEverywhere")]
 fn a_false_same_everywhere_claim_panics_in_debug() {
     let game = ClaimsSameEverywhere(ChanceLine::default());
     let mut searcher = Searcher::new(&game);

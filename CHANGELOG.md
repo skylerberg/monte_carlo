@@ -383,6 +383,18 @@ byte-identical and node counts are bit-identical in every configuration.
   throughput 1.6x, and over 2 000 self-play games at equal iterations it scored
   1 001 to 999 against `SameAtRoot`. Debug builds re-enumerate every node the
   claim lets them skip and panic on a mismatch.
+* **`Game::choices_fixed`: the same claim, made per position.**
+  `CHOICES_ON_REVISIT` answers once for every node, so a game whose choices are
+  fixed only in stretches of play could claim nothing: a turn that every
+  determinization begins identically, say, but not across a hidden draw. The
+  search asks `choices_fixed` on the visits that enumerate anyway and records
+  the answer in the node's existing match bit, so a node whose choices are known
+  costs nothing more. Its default is the const, and a game that does not
+  override it searches exactly as before (the sequential fingerprint is
+  unchanged). A card game claiming it for the action phase of the turn a search
+  begins in took 11.9% fewer cycles per iteration at those roots and 4.5% less
+  search time per iteration over whole games, and won 530 to 464 (6 drawn) over
+  1 000 games at equal iterations against itself without the claim.
 * **`Marginals::policy_masked_into`. This player's strategy restricted to the
   arms legal in the real position and normalized over them, with the mask
   supplied by the caller. `Searcher::root_policy_into` is the same extraction at

@@ -1013,6 +1013,10 @@ mod tests {
             self.0.status(ctx)
         }
 
+        fn choices_fixed(&self, ctx: &Self::Context, at_root: bool) -> bool {
+            self.0.choices_fixed(ctx, at_root)
+        }
+
         fn choices_into(&self, ctx: &Self::Context, out: &mut Vec<Self::Choice>) {
             self.0.choices_into(ctx, out)
         }
