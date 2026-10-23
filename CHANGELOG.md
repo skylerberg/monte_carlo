@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+* **`ObservedSearcher`, for games whose moves conceal something.** Implement
+  `Observed::observed_key`, which says how one player perceives another's move,
+  and the searcher keeps one tree per player. Two moves the observer cannot tell
+  apart share a node, so the opponent's statistics at that node are the mixture
+  over what the move might have been — its information set, and the belief a
+  bluff is played against. `Searcher` keys edges by `Choice`, so each concealed
+  value got its own subtree and the simulated opponent inside it had been shown
+  exactly what was hidden. A separate searcher, as `GraphSearcher` is: `Game`
+  gains nothing, `Node` and the sequential descent are untouched, and a game
+  that does not implement `Observed` emits none of it. Debug builds
+  re-determinize from each observer's own perspective and assert the key does
+  not move, which is how a key that reads hidden state shows up. Sequential
+  decisions only — `Status::Simultaneous` is refused — and no transposition
+  merging, no early termination.
+
 ### Changed
 
 * **Breaking: `Game::ROOT_CHOICES_INVARIANT` is now `Game::CHOICES_ON_REVISIT`,

@@ -742,6 +742,74 @@ pub trait Transposition: Game {
     fn transposition_key(&self, ctx: &Self::Context) -> Option<Self::Key>;
 }
 
+/// How one player perceives another player's move: the identity of an edge in
+/// that player's tree, for [`crate::ObservedSearcher`].
+///
+/// # Why a move needs two identities
+///
+/// [`Searcher`](crate::Searcher) identifies an edge by its [`Game::Choice`],
+/// which must be full value identity. Where a move conceals something — a card
+/// played face down, a bid whose meaning is private — two moves that reveal the
+/// same thing to the observer are still two different choices, so they lead to
+/// two subtrees, and each one's opponent statistics have only ever been built
+/// against that one concealed value. The simulated opponent then answers the
+/// move it can see the inside of, and a bluff is worth exactly what honesty is.
+///
+/// A key is the move as one player perceives it. When two concealed moves share
+/// a key they share a node, so the observer's statistics at that node are the
+/// mixture over everything the move might have been — which is its information
+/// set, and the belief a deception is played against. The searcher keeps one
+/// tree per player, each keyed by that player's own [`Observed::observed_key`],
+/// and each player chooses from its own.
+///
+/// Both halves are needed. Keys alone, in one tree, would still let a
+/// player's move be selected against the world the *searcher* drew; trees alone,
+/// with `Choice` identity, would still split the observer's information set.
+///
+/// # What a key must depend on
+///
+/// What `observer` knows — its own cards and faces, anything it has been shown,
+/// the public history — and the move itself. Nothing else.
+///
+/// * **Never information `observer` lacks.** A key that reads it splits one of
+///   `observer`'s information sets into many, and the simulated player chooses
+///   at each with knowledge it does not have. Debug builds check exactly this:
+///   the searcher re-determinizes from `observer`'s own perspective, which
+///   leaves everything `observer` knows untouched, and asserts the key does not
+///   move.
+/// * **Coarser is safe, finer is not.** Merging moves the observer *could* tell
+///   apart only makes the simulated player less effective, because it decides
+///   as though it were less sure than it is. Splitting moves it could not tell
+///   apart is the leak above. So the cheapest safe rule is: identity for moves
+///   everyone sees, and collapse exactly what is concealed.
+/// * **The move need not be legal where the key is read.** The debug check reads
+///   the key in a world where whatever the move concealed has been resampled,
+///   so key the move rather than looking facts about it up in the state.
+/// * **`actor == observer` must be injective.** A player knows what it is doing,
+///   and the root's answer is read back off that key. Debug builds assert it.
+///
+/// # Cost
+///
+/// One call per legal move per step of the searcher's descent, per player whose
+/// tree is advanced. A game that does not implement this trait pays nothing for
+/// it: the searcher is separate, and no part of [`crate::Searcher`] consults
+/// it.
+pub trait Observed: Game {
+    /// An edge's identity in `observer`'s tree. Two moves `observer` cannot
+    /// tell apart share a key, and their statistics accumulate in one node.
+    type Key: Clone + Eq + Hash;
+
+    /// How `observer` perceives `choice` made by `actor`. See the trait
+    /// documentation for what it may and may not depend on.
+    fn observed_key(
+        &self,
+        ctx: &Self::Context,
+        choice: &Self::Choice,
+        actor: u8,
+        observer: u8,
+    ) -> Self::Key;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

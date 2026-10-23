@@ -3,10 +3,14 @@
 use mcts::rand_core::Rng;
 use mcts::{Game, Status};
 
+mod bluff;
 mod simul;
 mod transposition;
-// Flat, so a test names `common::BiasedRps`; allowed unused because a test
-// binary that touches no simultaneous fixture would otherwise fail the build.
+// Flat, so a test names `common::Bluff`. Allowed unused because a test binary
+// that touches no fixture in one of these modules would otherwise fail the
+// build.
+#[allow(unused_imports)]
+pub use bluff::*;
 #[allow(unused_imports)]
 pub use simul::*;
 #[allow(unused_imports)]
