@@ -1906,6 +1906,83 @@ fn a_wall_clock_budget_stops_the_search() {
     );
 }
 
+/// A caller-supplied clock is the whole reason the deadline exists on wasm,
+/// where `Instant` panics: it has to stop the search in a build with no `time`
+/// feature at all, and it has to be preferred over `Instant` where both are
+/// available.
+///
+/// The clock jumps a second per reading, so the budget is spent on the first
+/// poll and the iteration budget below is left almost untouched. This test is
+/// deliberately not gated on the feature: `cargo test --no-default-features` is
+/// the configuration a wasm caller runs, and it is the one where a regression
+/// here would go unnoticed until a browser build ran until killed.
+static FAKE_CLOCK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn fake_clock() -> u64 {
+    FAKE_CLOCK_MS.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[test]
+fn a_caller_supplied_clock_stops_the_search() {
+    const BUDGET: u32 = 2_000_000;
+
+    FAKE_CLOCK_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    let fuse = Fuse::new(u32::MAX);
+    let game = Countdown { ply: 0 };
+    let cfg = Config {
+        time_limit_ms: Some(50),
+        clock: Some(fake_clock),
+        ..config(BUDGET)
+    };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &fuse, 0, &cfg, None, &mut rng(3));
+
+    assert_eq!(result.stop_reason, StopReason::Deadline);
+    assert!(
+        result.iterations_used < BUDGET,
+        "the search spent its whole {BUDGET}-iteration budget, so the caller's clock never \
+         stopped anything"
+    );
+}
+
+/// A clock and no budget is not a budget: `time_limit_ms: None` means the
+/// iteration count is the only thing that ends the loop, whatever the caller
+/// installed.
+#[test]
+fn a_clock_without_a_budget_does_not_stop_the_search() {
+    static NEVER_ADVANCES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn frozen() -> u64 {
+        NEVER_ADVANCES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    let fuse = Fuse::new(u32::MAX);
+    let game = Countdown { ply: 0 };
+    let cfg = Config {
+        time_limit_ms: None,
+        clock: Some(frozen),
+        ..config(200)
+    };
+    let mut searcher = Searcher::new(&game);
+    let result = searcher.search(&game, &fuse, 0, &cfg, None, &mut rng(3));
+    assert_eq!(result.stop_reason, StopReason::Budget);
+}
+
+/// Without the feature and without a clock there is no way to read the time, so
+/// the budget is refused instead of silently ignored.
+#[cfg(not(feature = "time"))]
+#[test]
+#[should_panic(expected = "but this build has no clock")]
+fn a_budget_without_a_clock_is_refused() {
+    let game = Countdown { ply: 0 };
+    let fuse = Fuse::new(u32::MAX);
+    let cfg = Config {
+        time_limit_ms: Some(50),
+        ..config(200)
+    };
+    let mut searcher = Searcher::new(&game);
+    searcher.search(&game, &fuse, 0, &cfg, None, &mut rng(3));
+}
+
 /// A deadline already in the past is the deterministic half of the same knob:
 /// the clock is read before the first determinization, so the search completes
 /// no iterations and still answers with a move this position holds.

@@ -43,9 +43,12 @@ game; run it with `cargo run --example tic_tac_toe`.
   with a mixed equilibrium is played mixed rather than exploitably. What is
   proved and what is not is spelled out below.
 * **Budgets** by iterations or wall clock — one of the two is required — either
-  of which an external `AtomicBool` can cut short. Plus early termination once
-  the remaining iterations provably cannot change the answer, which an
-  `iterations: u32::MAX` run-until-cancelled budget switches off in practice.
+  of which an external `AtomicBool` can cut short. The clock is `Instant` with
+  the `time` feature and `Config::clock` — a caller-supplied `fn() -> u64` —
+  without it, so a wasm build can run to a real deadline instead of to an
+  iteration guess. Plus early termination once the remaining iterations provably
+  cannot change the answer, which an `iterations: u32::MAX` run-until-cancelled
+  budget switches off in practice.
 * **Tree reuse** across moves, and root parallelism behind the `parallel`
   feature.
 * **Progressive bias** from a game-supplied prior, evaluated once per child.

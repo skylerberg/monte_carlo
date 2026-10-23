@@ -296,7 +296,7 @@ impl<G: Game + Observed> ObservedSearcher<G> {
         state.init_side(ctx, side);
 
         let target = cfg.iterations;
-        let deadline = Deadline::new(cfg.time_limit_ms);
+        let deadline = Deadline::new(cfg.time_limit_ms, cfg.clock);
         let reused_iterations = trees[perspective as usize].visits();
         let mut iterations_used: u32 = 0;
         #[cfg(debug_assertions)]

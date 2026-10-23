@@ -13,7 +13,9 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = ["time"]
-# Wall-clock search budgets. Off for wasm targets, where `Instant` panics.
+# `Instant`-backed wall-clock budgets. Off by default for wasm targets, where
+# `Instant` panics; a wasm caller gets a deadline by passing `Config::clock`
+# instead, which works in every build.
 time = []
 # Root-parallel search over std::thread::scope.
 parallel = []
