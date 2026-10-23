@@ -51,6 +51,10 @@ game; run it with `cargo run --example tic_tac_toe`.
 * **Progressive bias** from a game-supplied prior, evaluated once per child.
 * **Transpositions** — `GraphSearcher` merges every route into a position into
   one node, for games that implement `Transposition`. See below.
+* **Deception** — `ObservedSearcher` keeps one tree per player, keyed by the
+  move as that player perceives it, so a move that conceals something is
+  answered from the opponent's information set rather than from the world the
+  search drew. For games that implement `Observed`. See below.
 
 ## Transpositions
 
@@ -89,6 +93,66 @@ visit and panic if it changes, which is how a key that reads hidden or random
 state shows up. `GraphRootParallel` is the `parallel` feature's pool over graphs.
 `TRANSPOSITIONS.md` has the design, the key contract, and what is not claimed —
 chiefly convergence, which UCT's proof does not cover on a graph.
+
+## Deception
+
+A move can be worth what it hides. Where `Searcher` identifies an edge by the
+`Choice`, two moves that conceal different things are two subtrees, and the
+simulated opponent inside each has only ever been shown that one concealed
+value — so it answers the move it can see through, and a bluff is worth exactly
+what disclosing is. Implement `Observed` to say how each player perceives a
+move, and search with `ObservedSearcher`:
+
+```rust
+impl Observed for MyGame {
+    // Small and cheap — an index or a packed enum, not a hash, so a collision
+    // can never merge two moves that play differently.
+    type Key = Seen;
+
+    fn observed_key(&self, ctx: &Ctx, choice: &Choice, actor: u8, observer: u8) -> Seen {
+        if actor == observer {
+            return Seen::Exact(choice.index());   // a player knows its own move
+        }
+        match choice {
+            // Concealed: the observer learns that a card was laid down, not
+            // which one. Merging the two here is the whole point.
+            Choice::Lay(_) => Seen::FaceDown,
+            // Public: everyone sees exactly what happened.
+            other => Seen::Exact(other.index()),
+        }
+    }
+}
+
+let mut searcher = ObservedSearcher::new(&state, 2);   // one tree per player
+let result = searcher.search(&state, &ctx, player, &config, None, &mut rng);
+```
+
+Moves that share a key lead to one node, whose statistics are the mixture over
+what the move might have been: the observer's information set, and the belief a
+bluff is played against. One tree is kept per player, each player chooses from
+its own, and every tree is advanced along the same determinization so their
+paths stay aligned. The searcher's answer is read off the perspective player's
+tree, where the key for its own moves must be exact.
+
+A key must depend on what the observer knows and on the move — never on
+information the observer lacks. Debug builds check that by determinizing from
+the observer's own perspective, which leaves everything it knows untouched, and
+asserting the key does not move. Merging worlds the observer *could* tell apart
+only makes the simulated player weaker; splitting worlds it could not tell apart
+hands it information it does not have, which is the strategy fusion this
+searcher exists to prevent. Where a move is public the key should be the move,
+so the merging is only ever at what is actually concealed.
+
+It is a separate searcher on purpose, as `GraphSearcher` is: `Searcher`'s node,
+descent and backup are untouched, `Game` gains no method or associated type, and
+a game that never implements `Observed` emits none of it.
+
+Two limits, both refused rather than approximated: a `Status::Simultaneous`
+state is a panic (concurrent moves belong to `Searcher`), and there is no
+transposition merging on top of per-observer keys. `Config::early_termination`
+is not used here, because the proof in `early_stop` is about one tree's
+candidates and other trees are growing alongside it. `OBSERVERS.md` has the
+algorithm, the key contract, and what is and is not claimed.
 
 ## Simultaneous moves
 

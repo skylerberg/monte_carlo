@@ -101,13 +101,21 @@
 //!   once per order of play. A separate searcher, so a game that does not opt in
 //!   pays nothing; where nothing merges it searches exactly as [`Searcher`]
 //!   does. `TRANSPOSITIONS.md` has the design and what is and is not claimed.
+//! * **Deception.** Implement [`Observed`] and search with
+//!   [`ObservedSearcher`], and each player gets a tree of its own, keyed by the
+//!   move *as that player perceives it*. Two moves that conceal the same thing
+//!   share one node, so the simulated opponent answers its information set
+//!   rather than the world the search drew — which is what makes a bluff worth
+//!   more than disclosure. Another separate searcher, again so that nothing
+//!   here costs a game that does not conceal.
 //!
 //! # Allocation
 //!
 //! A steady-state iteration allocates nothing but tree growth. Determinization
 //! writes into one scratch state; move generation fills one reused buffer; each
 //! `Choice` is stored once per edge. The same holds for [`GraphSearcher`], whose
-//! growth is the graph's.
+//! growth is the graph's, and for [`ObservedSearcher`], which grows one tree per
+//! player.
 
 #![warn(missing_docs)]
 
@@ -117,6 +125,7 @@ mod early_stop;
 mod game;
 mod graph;
 mod node;
+mod observed;
 mod rank;
 mod search;
 mod select;
@@ -130,11 +139,12 @@ mod parallel;
 pub use rand_core;
 
 pub use game::{
-    ChoicesOnRevisit, Game, JointChoices, PlayerSet, PlayerSetIter, Rewards, SimultaneousPolicy,
-    Status, Transposition,
+    ChoicesOnRevisit, Game, JointChoices, Observed, PlayerSet, PlayerSetIter, Rewards,
+    SimultaneousPolicy, Status, Transposition,
 };
 pub use graph::{Graph, GraphEdge, GraphNode, GraphSearcher};
 pub use node::{Edge, Marginals, Node, NodeKind};
+pub use observed::{ObservedNode, ObservedSearcher};
 pub use search::{Config, RootPolicy, SearchResult, Searcher, SimultaneousConfig, StopReason};
 
 #[cfg(feature = "parallel")]
