@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* **`Config::clock`, so a wall-clock budget works where `Instant` does not.**
+  The `time` feature backs `Config::time_limit_ms` with `std::time::Instant`,
+  which panics on `wasm32-unknown-unknown` — so wasm builds had no deadline at
+  all and had to guess an iteration count. `Config::clock` takes a plain
+  `fn() -> u64` returning monotonic milliseconds; when it is set the deadline is
+  computed from two readings of it and `Instant` is never touched, in any build
+  profile. A `time_limit_ms` with neither a clock nor the feature is refused by
+  `Config::refusal` with a message that names the fix. The clock is polled with
+  the deadline — once every 32 iterations — so it costs one indirect call per 32
+  visits. `fn` pointers are not serializable, so the field is `serde(skip)`.
+
 * **`ObservedSearcher`, for games whose moves conceal something.** Implement
   `Observed::observed_key`, which says how one player perceives another's move,
   and the searcher keeps one tree per player. Two moves the observer cannot tell

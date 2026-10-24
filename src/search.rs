@@ -72,8 +72,30 @@ pub struct Config {
     /// [`Config::early_termination`], whose proof compares the iterations left
     /// against the evidence bar and never fires against a budget that large.
     pub iterations: u32,
-    /// Wall-clock budget. Requires the `time` feature.
+    /// Wall-clock budget, in milliseconds.
+    ///
+    /// Read through [`Config::clock`] when one is given, and through
+    /// [`std::time::Instant`] otherwise — which requires the `time` feature and
+    /// panics on `wasm32-unknown-unknown`, where `Instant` panics. So a wasm
+    /// build sets this *and* a clock, and gets exactly the budget it asked for;
+    /// a build with neither a clock nor the feature refuses the combination
+    /// rather than pretending the budget exists.
+    ///
+    /// The clock is polled every 32 iterations, so a budget shorter than one
+    /// poll's worth of work overruns by at most that.
     pub time_limit_ms: Option<u64>,
+    /// A monotonic millisecond reader, for builds without `Instant`.
+    ///
+    /// The crate takes a plain `fn` pointer rather than a trait object or a
+    /// generic parameter: it is `Copy`, it serializes to nothing, and it costs
+    /// one indirect call per 32 iterations instead of an abstraction in the
+    /// descent. `None` means "use `Instant`, if this build has it".
+    ///
+    /// Any epoch will do — the deadline is computed from two readings of the
+    /// same clock, so it only has to move forward. On wasm the usual source is
+    /// an imported host function (`performance.now()` in the browser).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub clock: Option<fn() -> u64>,
     /// UCB1 exploration constant. Tune it against your reward scale.
     pub exploration_constant: f64,
     /// Weight on [`Game::heuristic_bias`]. Zero disables progressive bias, and
@@ -228,6 +250,7 @@ impl Default for Config {
         Self {
             iterations: 10_000,
             time_limit_ms: None,
+            clock: None,
             exploration_constant: 0.75,
             progressive_bias_weight: 0.0,
             early_termination: true,
@@ -277,6 +300,18 @@ impl Config {
     pub(crate) fn refusal(&self) -> Option<String> {
         if self.iterations == 0 && self.time_limit_ms.is_none() {
             return Some("mcts: Config has neither an iteration nor a time budget".into());
+        }
+        // The deadline needs a clock, and a build without `time` has none of its
+        // own: `Instant` panics on `wasm32-unknown-unknown`. Refused here rather
+        // than where the deadline is built, so a pooled search reports it on the
+        // pool's thread — before any worker is armed — instead of inside one.
+        if self.time_limit_ms.is_some() && self.clock.is_none() && !cfg!(feature = "time") {
+            return Some(
+                "mcts: Config has a `time_limit_ms` but this build has no clock: the `time` \
+                 feature is off (it is off for `wasm32-unknown-unknown`, where `Instant` panics). \
+                 Pass `Config::clock`, a function returning monotonic milliseconds."
+                    .into(),
+            );
         }
         // Ahead of the range check, which compares with `<=` and is therefore
         // false in both directions for a NaN bound.
@@ -908,7 +943,7 @@ impl<G: Game> Searcher<G> {
         scratch.root_legal.clear();
         scratch.root_legal_complete = false;
         let target = cfg.iterations;
-        let deadline = Deadline::new(cfg.time_limit_ms);
+        let deadline = Deadline::new(cfg.time_limit_ms, cfg.clock);
         let reused_iterations = root.visits;
         let mut iterations_used: u32 = 0;
         #[cfg(debug_assertions)]

@@ -88,6 +88,10 @@
 //!   converges to what, and what determinization does to that claim.
 //! * **Budgets** by iteration count or wall clock — one of the two is
 //!   required — either of which an external cancellation flag can cut short.
+//!   The wall clock is [`std::time::Instant`] when the `time` feature is on and
+//!   whatever [`Config::clock`] returns otherwise, which is how a wasm build
+//!   gets a deadline at all: `Instant` panics on `wasm32-unknown-unknown`, so a
+//!   host clock (an imported `performance.now()`) is the only one there is.
 //!   To run until cancelled and no sooner, set [`Config::iterations`] to
 //!   `u32::MAX`; the flag is polled once an iteration. Plus early termination
 //!   once the answer provably cannot change, which that sentinel does disable:
